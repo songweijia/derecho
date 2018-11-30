@@ -164,7 +164,10 @@ public:
         ReplyMap(QueryResults& qr) : parent(qr){};
         ReplyMap(const ReplyMap&) = delete;
         ReplyMap(QueryResults& qr, ReplyMap&& rm) : parent(qr), rmap(std::move(rm.rmap)) {}
-        ReplyMap& operator=(ReplyMap&&) = default;
+        ReplyMap& operator=(ReplyMap&& rm) {
+            rmap = std::move(rm.rmap);
+	    return *this;
+        }
 
         bool valid(const node_id_t& nid) {
             assert(rmap.size() == 0 || rmap.count(nid) != 0);
@@ -207,6 +210,7 @@ public:
     QueryResults& operator=(QueryResults&& o) {
         pending_rmap = std::move(o.pending_rmap);
         replies = std::move(o.replies);
+	return *this;
     }
     QueryResults(const QueryResults&) = delete;
 
@@ -264,7 +268,11 @@ public:
 
         ReplyMap(QueryResults& qr) : parent(qr){};
         ReplyMap(const ReplyMap&) = delete;
-        ReplyMap(ReplyMap&& rm) : parent(rm.parent), rmap(std::move(rm.rmap)) {}
+        ReplyMap(QueryResults& qr, ReplyMap&& rm) : parent(qr), rmap(std::move(rm.rmap)) {}
+        ReplyMap& operator=(ReplyMap&& rm) {
+            rmap = std::move(rm.rmap);
+	    return *this;
+        }
 
         bool valid(const node_id_t& nid) {
             assert(rmap.size() == 0 || rmap.count(nid) != 0);
@@ -288,10 +296,16 @@ private:
     ReplyMap replies{*this};
 
 public:
+    QueryResults() = default;
     QueryResults(map_fut pm) : pending_rmap(std::move(pm)) {}
     QueryResults(QueryResults&& o)
             : pending_rmap{std::move(o.pending_rmap)},
-              replies{std::move(o.replies)} {}
+              replies{*this, std::move(o.replies)} {}
+    QueryResults& operator=(QueryResults&& o) {
+        pending_rmap = std::move(o.pending_rmap);
+        replies = std::move(o.replies);
+	return *this;
+    }
     QueryResults(const QueryResults&) = delete;
 
     /**

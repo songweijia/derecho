@@ -234,7 +234,7 @@ public:
             // declare the QueryResults and PendingResults as a pointer outside
             // serializer will be called inside multicast_group.cpp, in send
             // but we need the object after that, outside the lambda
-            rpc::QueryResults<Ret>* results_ptr;
+            rpc::QueryResults<Ret> results_ptr;
             rpc::PendingResults<Ret>* pending_ptr;
 
             auto serializer = [&](char* buffer) {
@@ -251,7 +251,7 @@ public:
                             }
                         },
                         std::forward<Args>(args)...);
-                results_ptr = new rpc::QueryResults<Ret>(std::move(send_return_struct.results));
+                results_ptr = rpc::QueryResults<Ret>(std::move(send_return_struct.results));
                 pending_ptr = &send_return_struct.pending;
             };
 
@@ -264,9 +264,7 @@ public:
                 group_rpc_manager.finish_rpc_send(*pending_ptr);
                 return true;
             });
-	    struct deleter {rpc::QueryResults<Ret>* ptr; ~deleter(){delete ptr;}};
-	    deleter d; d.ptr = results_ptr;
-            return std::move(*results_ptr);
+            return std::move(results_ptr);
         } else {
             throw derecho::empty_reference_exception{"Attempted to use an empty Replicated<T>"};
         }

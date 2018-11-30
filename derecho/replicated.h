@@ -229,13 +229,11 @@ public:
     auto ordered_send(Args&&... args) {
         if(is_valid()) {
             size_t msg_size = wrapped_this->template get_size<tag>(std::forward<Args>(args)...);
-            // // declare send_return_struct outside the lambda 'serializer'
-            // // serializer will be called inside multicast_group.cpp, in send
-            // // but we need the object after that, outside the lambda
-            // // it's a pointer because one of its members is a reference
-            // typename std::invoke_result<decltype (&rpc::RemoteInvocableOf<T>::template send<tag>)(rpc::RemoteInvocableOf<T>, std::function<char*(int)>&, Args...)>::type send_return_struct_ptr;
+            using Ret = typename decltype(wrapped_this-> template send<tag>(std::declval<std::function<char*(int)>>(), args...))::ret_t;
 
-            using Ret = typename std::remove_pointer<decltype(wrapped_this->template getReturnType<tag>(std::forward<Args>(args)...))>::type;
+            // declare the QueryResults and PendingResults as a pointer outside
+            // serializer will be called inside multicast_group.cpp, in send
+            // but we need the object after that, outside the lambda
             rpc::QueryResults<Ret>* results_ptr;
             rpc::PendingResults<Ret>* pending_ptr;
 
@@ -266,6 +264,8 @@ public:
                 group_rpc_manager.finish_rpc_send(*pending_ptr);
                 return true;
             });
+	    struct deleter {rpc::QueryResults<Ret>* ptr; ~deleter(){delete ptr;}};
+	    deleter d; d.ptr = results_ptr;
             return std::move(*results_ptr);
         } else {
             throw derecho::empty_reference_exception{"Attempted to use an empty Replicated<T>"};

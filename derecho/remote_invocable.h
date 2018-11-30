@@ -46,10 +46,6 @@ struct RemoteInvoker<Tag, std::function<Ret(Args...)>> {
     const Opcode invoke_opcode;
     const Opcode reply_opcode;
 
-    Ret* returnRet() {
-        return 0;
-    }
-
     //Maps invocation-instance IDs to results sets
     std::map<std::size_t, PendingResults<Ret>> results_map;
     std::mutex map_lock;
@@ -561,12 +557,6 @@ public:
         return size;
     }
 
-    template <FunctionTag Tag, typename... Args>
-    auto* getReturnType(Args&&... args) {
-        constexpr std::integral_constant<FunctionTag, Tag>* choice{nullptr};
-        return this->get_invoker(choice, args...).returnRet();
-    }
-
     /**
      * Constructs a message that will remotely invoke a method of this class,
      * supplying the specified arguments, using RPC.
@@ -577,6 +567,12 @@ public:
      * results ("results"), and a set of corresponding promises for those
      * results ("pending").
      */
+    template <typename Ret>
+    struct _send_return {
+        using ret_t = Ret;
+        QueryResults<Ret> results;
+        PendingResults<Ret>& pending;
+        };
     template <FunctionTag Tag, typename... Args>
     auto send(const std::function<char*(int)>& out_alloc, Args&&... args) {
         using namespace remote_invocation_utilities;
@@ -599,11 +595,7 @@ public:
           much like previous definition, except with
           two fewer fields
         */
-        struct send_return {
-            QueryResults<Ret> results;
-            PendingResults<Ret>& pending;
-        };
-        return send_return{std::move(sent_return.results),
+        return _send_return<Ret>{std::move(sent_return.results),
                            sent_return.pending};
     }
 
@@ -657,6 +649,11 @@ public:
             : RemoteInvokers<WrappedFuns...>(type_id, instance_id, rvrs),
               nid(nid) {}
 
+    template <typename Ret>
+    struct _send_return {
+        QueryResults<Ret> results;
+        PendingResults<Ret>& pending;
+    };
     template <FunctionTag Tag, typename... Args>
     auto send(const std::function<char*(int)>& out_alloc, Args&&... args) {
         using namespace remote_invocation_utilities;
@@ -679,11 +676,7 @@ public:
           much like previous definition, except with
           two fewer fields
         */
-        struct send_return {
-            QueryResults<Ret> results;
-            PendingResults<Ret>& pending;
-        };
-        return send_return{std::move(sent_return.results),
+        return _send_return<Ret>{std::move(sent_return.results),
                            sent_return.pending};
     }
 };

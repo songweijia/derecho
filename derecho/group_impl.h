@@ -12,6 +12,7 @@
 #include "container_template_functions.h"
 #include "derecho_internal.h"
 #include "group.h"
+#include "group_admin.h"
 
 namespace derecho {
 
@@ -37,8 +38,8 @@ RawSubgroup& GroupProjection<RawObject>::get_subgroup(uint32_t subgroup_num) {
     return *((RawSubgroup*)ret);
 }
 
-template <typename... ReplicatedTypes>
-void Group<ReplicatedTypes...>::set_replicated_pointer(std::type_index type,
+template <typename ExtendedAdmin, typename... ReplicatedTypes>
+void Group<ExtendedAdmin, ReplicatedTypes...>::set_replicated_pointer(std::type_index type,
                                                        uint32_t subgroup_num,
                                                        void** ret) {
     if(type == std::type_index{typeid(RawObject)}) {
@@ -51,11 +52,11 @@ void Group<ReplicatedTypes...>::set_replicated_pointer(std::type_index type,
     }
 }
 
-/* Leader constructor */
-template <typename... ReplicatedTypes>
-Group<ReplicatedTypes...>::Group(const CallbackSet& callbacks,
+template <typename ExtendedAdmin, typename... ReplicatedTypes>
+Group<ExtendedAdmin, ReplicatedTypes...>::Group(const CallbackSet& callbacks,
                                  const SubgroupInfo& subgroup_info,
                                  std::vector<view_upcall_t> _view_upcalls,
+                                 Factory<ExtendedAdmin> admin_factory,
                                  Factory<ReplicatedTypes>... factories)
         : whenlog(logger(create_logger()), )
           my_id(getConfUInt32(CONF_DERECHO_LOCAL_ID)),
@@ -70,22 +71,26 @@ Group<ReplicatedTypes...>::Group(const CallbackSet& callbacks,
           persistence_manager(callbacks.local_persistence_callback),
           //Initially empty, all connections are added in the new view callback
           tcp_sockets(std::make_shared<tcp::tcp_connections>(my_id, std::map<node_id_t, std::pair<ip_addr_t, uint16_t>>{{my_id, {getConfString(CONF_DERECHO_LOCAL_IP), getConfUInt16(CONF_DERECHO_RPC_PORT)}}})),
+          rpc_manager(),
+          admin_object_ptr(construct_admin_object(admin_factory)),
           view_manager([&]() {
               if(is_starting_leader) {
-                  return ViewManager(callbacks, subgroup_info,
+                  return ViewManager(callbacks, [this](){return admin_object_ptr->get();},
+                                     {std::type_index(typeid(ReplicatedTypes))...},
                                      tcp_sockets, objects_by_subgroup_id,
                                      persistence_manager.get_callbacks(),
                                      _view_upcalls);
               } else {
                   return ViewManager(leader_connection.value(), callbacks,
-                                     subgroup_info, tcp_sockets,
+                                     [this](){return admin_object_ptr->get();},
+                                     {std::type_index(typeid(ReplicatedTypes))...},
+                                     tcp_sockets,
                                      objects_by_subgroup_id,
                                      persistence_manager.get_callbacks(),
                                      _view_upcalls);
               }
           }()),
-          rpc_manager(view_manager),
-          factories(make_kind_map(factories...)),
+          factories(make_kind_map(admin_factory, factories...)),
           raw_subgroups(construct_raw_subgroups(view_manager.get_current_view().get())) {
     set_up_components();
     vector_int64_2d restart_shard_leaders = view_manager.finish_setup();
@@ -112,8 +117,8 @@ Group<ReplicatedTypes...>::Group(const CallbackSet& callbacks,
     persistence_manager.start();
 }
 
-template <typename... ReplicatedTypes>
-Group<ReplicatedTypes...>::~Group() {
+template <typename ExtendedAdmin, typename... ReplicatedTypes>
+Group<ExtendedAdmin, ReplicatedTypes...>::~Group() {
     // shutdown the persistence manager
     // TODO-discussion:
     // Will a nodebe able to come back once it leaves? if not, maybe we should
@@ -122,15 +127,32 @@ Group<ReplicatedTypes...>::~Group() {
     tcp_sockets->destroy();
 }
 
-template <typename... ReplicatedTypes>
+template <typename ExtendedAdmin, typename... ReplicatedTypes>
+std::unique_ptr<std::unique_ptr<ExtendedAdmin>>& Group<ExtendedAdmin, ReplicatedTypes...>::construct_admin_object(Factory<ExtendedAdmin>& admin_factory) {
+    //Construct a Replicated<ExtendedAdmin> like normal, but save a pointer to its ExtendedAdmin object
+    //Note that the GroupAdmin object is always subgroup 0
+    if(is_starting_leader) {
+        replicated_objects.template get<ExtendedAdmin>().emplace(
+                0, Replicated<ExtendedAdmin>(0, my_id, 0, 0, 0, rpc_manager, admin_factory, this));
+    } else {
+        replicated_objects.template get<ExtendedAdmin>().emplace(
+                0, Replicated<ExtendedAdmin>(0, my_id, 0, 0, 0, rpc_manager, this));
+    }
+    objects_by_subgroup_id.emplace(0, replicated_objects.template get<ExtendedAdmin>().at(0));
+    return replicated_objects.template get<ExtendedAdmin>().at(0).user_object_ptr;
+}
+
+template <typename ExtendedAdmin, typename... ReplicatedTypes>
 template <typename FirstType, typename... RestTypes>
-std::set<std::pair<subgroup_id_t, node_id_t>> Group<ReplicatedTypes...>::construct_objects(
+std::set<std::pair<subgroup_id_t, node_id_t>> Group<ExtendedAdmin, ReplicatedTypes...>::construct_objects(
         const View& curr_view,
         const vector_int64_2d& old_shard_leaders) {
     std::set<std::pair<subgroup_id_t, uint32_t>> subgroups_to_receive;
     if(!curr_view.is_adequately_provisioned) {
         return subgroups_to_receive;
     }
+    //Note: add 1 to account for GroupAdmin always being the first entry of the type list
+    const uint32_t curr_type_id = 1 + index_of_type<FirstType, ReplicatedTypes...>;
     const auto& subgroup_ids = curr_view.subgroup_ids_by_type.at(std::type_index(typeid(FirstType)));
     for(uint32_t subgroup_index = 0; subgroup_index < subgroup_ids.size(); ++subgroup_index) {
         subgroup_id_t subgroup_id = subgroup_ids.at(subgroup_index);
@@ -163,12 +185,12 @@ std::set<std::pair<subgroup_id_t, node_id_t>> Group<ReplicatedTypes...>::constru
                         /* Construct an "empty" Replicated<T>, since all of T's state will
                          * be received from the leader and there are no logs to update */
                         replicated_objects.template get<FirstType>().emplace(
-                                subgroup_index, Replicated<FirstType>(index_of_type<FirstType, ReplicatedTypes...>, my_id,
+                                subgroup_index, Replicated<FirstType>(curr_type_id, my_id,
                                                                       subgroup_id, subgroup_index,
                                                                       shard_num, rpc_manager, this));
                     } else {
                         replicated_objects.template get<FirstType>().emplace(
-                                subgroup_index, Replicated<FirstType>(index_of_type<FirstType, ReplicatedTypes...>, my_id,
+                                subgroup_index, Replicated<FirstType>(curr_type_id, my_id,
                                                                       subgroup_id, subgroup_index, shard_num, rpc_manager,
                                                                       factories.template get<FirstType>(), this));
                     }
@@ -180,8 +202,7 @@ std::set<std::pair<subgroup_id_t, node_id_t>> Group<ReplicatedTypes...>::constru
             }
         }
         if(!in_subgroup) {
-            // If we have a Replicated<T> for the subgroup, but we're no longer a
-            // member, delete it
+            // If we have a Replicated<T> for the subgroup, but we're no longer a member, delete it
             auto old_object = replicated_objects.template get<FirstType>().find(subgroup_index);
             if(old_object != replicated_objects.template get<FirstType>().end()) {
                 whenlog(logger->debug("Deleting old Replicated Object state (of type {}) for subgroup {} because this node is no longer a member", typeid(FirstType).name(), subgroup_index));
@@ -190,15 +211,15 @@ std::set<std::pair<subgroup_id_t, node_id_t>> Group<ReplicatedTypes...>::constru
             }
             // Create an ExternalCaller for the subgroup if we don't already have one
             external_callers.template get<FirstType>().emplace(
-                    subgroup_index, ExternalCaller<FirstType>(index_of_type<FirstType, ReplicatedTypes...>,
+                    subgroup_index, ExternalCaller<FirstType>(curr_type_id,
                                                               my_id, subgroup_id, rpc_manager));
         }
     }
     return functional_insert(subgroups_to_receive, construct_objects<RestTypes...>(curr_view, old_shard_leaders));
 }
 
-template <typename... ReplicatedTypes>
-std::vector<RawSubgroup> Group<ReplicatedTypes...>::construct_raw_subgroups(const View& curr_view) {
+template <typename ExtendedAdmin, typename... ReplicatedTypes>
+std::vector<RawSubgroup> Group<ExtendedAdmin, ReplicatedTypes...>::construct_raw_subgroups(const View& curr_view) {
     std::vector<RawSubgroup> raw_subgroup_vector;
     std::type_index raw_object_type(typeid(RawObject));
     auto ids_entry = curr_view.subgroup_ids_by_type.find(raw_object_type);
@@ -229,11 +250,13 @@ std::vector<RawSubgroup> Group<ReplicatedTypes...>::construct_raw_subgroups(cons
     return raw_subgroup_vector;
 }
 
-template <typename... ReplicatedTypes>
-void Group<ReplicatedTypes...>::set_up_components() {
+template <typename ExtendedAdmin, typename... ReplicatedTypes>
+void Group<ExtendedAdmin, ReplicatedTypes...>::set_up_components() {
     //Give PersistenceManager some pointers
     persistence_manager.set_objects(replicated_objects);
     persistence_manager.set_view_manager(view_manager);
+    //Tell RPCManager about ViewManager
+    rpc_manager.set_view_manager(view_manager);
     //Now that MulticastGroup is constructed, tell it about RPCManager's message handler
     SharedLockedReference<View> curr_view = view_manager.get_current_view();
     curr_view.get().multicast_group->register_rpc_callback([this](subgroup_id_t subgroup, node_id_t sender, char* buf, uint32_t size) {
@@ -258,8 +281,8 @@ void Group<ReplicatedTypes...>::set_up_components() {
 }
 
 #ifndef NOLOG
-template <typename... ReplicatedTypes>
-std::shared_ptr<spdlog::logger> Group<ReplicatedTypes...>::create_logger() const {
+template <typename ExtendedAdmin, typename... ReplicatedTypes>
+std::shared_ptr<spdlog::logger> Group<ExtendedAdmin, ReplicatedTypes...>::create_logger() const {
     spdlog::init_thread_pool(1048576, 1);
     std::vector<spdlog::sink_ptr> log_sinks;
     log_sinks.push_back(std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
@@ -281,8 +304,8 @@ std::shared_ptr<spdlog::logger> Group<ReplicatedTypes...>::create_logger() const
 }
 #endif
 
-template <typename... ReplicatedTypes>
-void Group<ReplicatedTypes...>::update_tcp_connections_callback(const View& new_view) {
+template <typename ExtendedAdmin, typename... ReplicatedTypes>
+void Group<ExtendedAdmin, ReplicatedTypes...>::update_tcp_connections_callback(const View& new_view) {
     if(std::find(new_view.joined.begin(), new_view.joined.end(), my_id) != new_view.joined.end()) {
         //If this node is in the joined list, we need to set up a connection to everyone
         for(int i = 0; i < new_view.num_members; ++i) {
@@ -306,8 +329,8 @@ void Group<ReplicatedTypes...>::update_tcp_connections_callback(const View& new_
     }
 }
 
-template <typename... ReplicatedTypes>
-std::unique_ptr<std::vector<std::vector<int64_t>>> Group<ReplicatedTypes...>::receive_old_shard_leaders(
+template <typename ExtendedAdmin, typename... ReplicatedTypes>
+std::unique_ptr<std::vector<std::vector<int64_t>>> Group<ExtendedAdmin, ReplicatedTypes...>::receive_old_shard_leaders(
         tcp::socket& leader_socket) {
     std::size_t buffer_size;
     leader_socket.read(buffer_size);
@@ -319,22 +342,23 @@ std::unique_ptr<std::vector<std::vector<int64_t>>> Group<ReplicatedTypes...>::re
     return mutils::from_bytes<std::vector<std::vector<int64_t>>>(nullptr, buffer);
 }
 
-template <typename... ReplicatedTypes>
-RawSubgroup& Group<ReplicatedTypes...>::get_subgroup(RawObject*,
+template <typename ExtendedAdmin, typename... ReplicatedTypes>
+RawSubgroup& Group<ExtendedAdmin, ReplicatedTypes...>::get_subgroup(RawObject*,
                                                      uint32_t subgroup_index) {
     return raw_subgroups.at(subgroup_index);
 }
 
-template <typename... ReplicatedTypes>
+template <typename ExtendedAdmin, typename... ReplicatedTypes>
 template <typename SubgroupType>
-Replicated<SubgroupType>& Group<ReplicatedTypes...>::get_subgroup(SubgroupType*,
+Replicated<SubgroupType>& Group<ExtendedAdmin, ReplicatedTypes...>::get_subgroup(SubgroupType*,
                                                                   uint32_t subgroup_index) {
     return replicated_objects.template get<SubgroupType>().at(subgroup_index);
 }
 
-template <typename... ReplicatedTypes>
+
+template <typename ExtendedAdmin, typename... ReplicatedTypes>
 template <typename SubgroupType>
-auto& Group<ReplicatedTypes...>::get_subgroup(uint32_t subgroup_index) {
+auto& Group<ExtendedAdmin, ReplicatedTypes...>::get_subgroup(uint32_t subgroup_index) {
     if(!view_manager.get_current_view().get().is_adequately_provisioned) {
         throw subgroup_provisioning_exception("View is inadequately provisioned because subgroup provisioning failed!");
     }
@@ -346,9 +370,9 @@ auto& Group<ReplicatedTypes...>::get_subgroup(uint32_t subgroup_index) {
     }
 }
 
-template <typename... ReplicatedTypes>
+template <typename ExtendedAdmin, typename... ReplicatedTypes>
 template <typename SubgroupType>
-ExternalCaller<SubgroupType>& Group<ReplicatedTypes...>::get_nonmember_subgroup(uint32_t subgroup_index) {
+ExternalCaller<SubgroupType>& Group<ExtendedAdmin, ReplicatedTypes...>::get_nonmember_subgroup(uint32_t subgroup_index) {
     try {
         return external_callers.template get<SubgroupType>().at(subgroup_index);
     } catch(std::out_of_range& ex) {
@@ -356,9 +380,9 @@ ExternalCaller<SubgroupType>& Group<ReplicatedTypes...>::get_nonmember_subgroup(
     }
 }
 
-template <typename... ReplicatedTypes>
+template <typename ExtendedAdmin, typename... ReplicatedTypes>
 template <typename SubgroupType>
-ShardIterator<SubgroupType> Group<ReplicatedTypes...>::get_shard_iterator(uint32_t subgroup_index) {
+ShardIterator<SubgroupType> Group<ExtendedAdmin, ReplicatedTypes...>::get_shard_iterator(uint32_t subgroup_index) {
     try {
         auto& EC = external_callers.template get<SubgroupType>().at(subgroup_index);
         View& curr_view = view_manager.get_current_view().get();
@@ -376,8 +400,8 @@ ShardIterator<SubgroupType> Group<ReplicatedTypes...>::get_shard_iterator(uint32
     }
 }
 
-template <typename... ReplicatedTypes>
-void Group<ReplicatedTypes...>::receive_objects(const std::set<std::pair<subgroup_id_t, node_id_t>>& subgroups_and_leaders) {
+template <typename ExtendedAdmin, typename... ReplicatedTypes>
+void Group<ExtendedAdmin, ReplicatedTypes...>::receive_objects(const std::set<std::pair<subgroup_id_t, node_id_t>>& subgroups_and_leaders) {
     //This will receive one object from each shard leader in ascending order of subgroup ID
     for(const auto& subgroup_and_leader : subgroups_and_leaders) {
         LockedReference<std::unique_lock<std::mutex>, tcp::socket> leader_socket
@@ -400,28 +424,28 @@ void Group<ReplicatedTypes...>::receive_objects(const std::set<std::pair<subgrou
     whenlog(logger->debug("Done receiving all Replicated Objects from subgroup leaders"));
 }
 
-template <typename... ReplicatedTypes>
-void Group<ReplicatedTypes...>::report_failure(const node_id_t who) {
+template <typename ExtendedAdmin, typename... ReplicatedTypes>
+void Group<ExtendedAdmin, ReplicatedTypes...>::report_failure(const node_id_t who) {
     view_manager.report_failure(who);
 }
 
-template <typename... ReplicatedTypes>
-void Group<ReplicatedTypes...>::leave() {
+template <typename ExtendedAdmin, typename... ReplicatedTypes>
+void Group<ExtendedAdmin, ReplicatedTypes...>::leave() {
     view_manager.leave();
 }
 
-template <typename... ReplicatedTypes>
-std::vector<node_id_t> Group<ReplicatedTypes...>::get_members() {
+template <typename ExtendedAdmin, typename... ReplicatedTypes>
+std::vector<node_id_t> Group<ExtendedAdmin, ReplicatedTypes...>::get_members() {
     return view_manager.get_members();
 }
 
-template <typename... ReplicatedTypes>
-void Group<ReplicatedTypes...>::barrier_sync() {
+template <typename ExtendedAdmin, typename... ReplicatedTypes>
+void Group<ExtendedAdmin, ReplicatedTypes...>::barrier_sync() {
     view_manager.barrier_sync();
 }
 
-template <typename... ReplicatedTypes>
-void Group<ReplicatedTypes...>::debug_print_status() const {
+template <typename ExtendedAdmin, typename... ReplicatedTypes>
+void Group<ExtendedAdmin, ReplicatedTypes...>::debug_print_status() const {
     view_manager.debug_print_status();
 }
 

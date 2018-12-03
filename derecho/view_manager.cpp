@@ -22,7 +22,8 @@ using shared_lock_t = std::shared_lock<std::shared_timed_mutex>;
 
 /* Leader/Restart Leader Constructor */
 ViewManager::ViewManager(
-        CallbackSet callbacks, const SubgroupInfo& subgroup_info,
+        CallbackSet callbacks, std::function<GroupAdmin*(void)> admin_object_getter,
+        const std::vector<std::type_index>& subgroup_type_order,
         const std::shared_ptr<tcp::tcp_connections>& group_tcp_sockets,
         ReplicatedObjectReferenceMap& object_reference_map,
         const persistence_manager_callbacks_t& _persistence_manager_callbacks,
@@ -32,11 +33,13 @@ ViewManager::ViewManager(
           server_socket(getConfUInt16(CONF_DERECHO_GMS_PORT)),
           thread_shutdown(false),
           view_upcalls(_view_upcalls),
-          subgroup_info(subgroup_info),
+          get_admin_object(admin_object_getter),
+          subgroup_initialization_order(subgroup_type_order),
           derecho_params(),
           group_member_sockets(group_tcp_sockets),
           subgroup_objects(object_reference_map),
           persistence_manager_callbacks(_persistence_manager_callbacks) {
+    get_admin_object()->set_subgroup_initialization_order(subgroup_initialization_order);
     std::map<subgroup_id_t, SubgroupSettings> subgroup_settings_map;
     uint32_t num_received_size = 0;
     bool is_total_restart;
@@ -77,7 +80,8 @@ ViewManager::ViewManager(
 /* Non-leader Constructor */
 ViewManager::ViewManager(
         tcp::socket& leader_connection, CallbackSet callbacks,
-        const SubgroupInfo& subgroup_info,
+        std::function<GroupAdmin*(void)> admin_object_getter,
+        const std::vector<std::type_index>& subgroup_type_order,
         const std::shared_ptr<tcp::tcp_connections>& group_tcp_sockets,
         ReplicatedObjectReferenceMap& object_reference_map,
         const persistence_manager_callbacks_t& _persistence_manager_callbacks,
@@ -87,7 +91,8 @@ ViewManager::ViewManager(
           server_socket(getConfUInt16(CONF_DERECHO_GMS_PORT)),
           thread_shutdown(false),
           view_upcalls(_view_upcalls),
-          subgroup_info(subgroup_info),
+          get_admin_object(admin_object_getter),
+          subgroup_initialization_order(subgroup_type_order),
           derecho_params(),
           group_member_sockets(group_tcp_sockets),
           subgroup_objects(object_reference_map),
@@ -106,7 +111,8 @@ ViewManager::ViewManager(
     if(is_total_restart) {
         num_received_size = derive_subgroup_settings(*curr_view, subgroup_settings_map);
     } else {
-        num_received_size = make_subgroup_maps(subgroup_info, std::unique_ptr<View>(), *curr_view, subgroup_settings_map);
+        make_subgroup_maps(*get_admin_object(), subgroup_initialization_order,
+                           std::unique_ptr<View>(), *curr_view, subgroup_settings_map, num_received_size);
     };
     whenlog(logger->trace("Received initial view: {}", curr_view->debug_string()););
     //Persist the initial View to disk as soon as possible, which is after subgroup membership has been assigned
@@ -184,8 +190,7 @@ bool ViewManager::receive_configuration(node_id_t my_id, tcp::socket& leader_con
         /* Protocol: Send the number of RaggedTrim objects, then serialize each RaggedTrim */
         /* Since we know this node is only a member of one shard per subgroup,
          * the size of the outer map (subgroup IDs) is the number of RaggedTrims. */
-        success
-                = leader_connection.write(restart_state->logged_ragged_trim.size());
+        success = leader_connection.write(restart_state->logged_ragged_trim.size());
         if(!success) throw derecho_exception("Restart leader crashed before sending a restart View!");
         for(const auto& id_to_shard_map : restart_state->logged_ragged_trim) {
             const std::unique_ptr<RaggedTrim>& ragged_trim = id_to_shard_map.second.begin()->second;  //The inner map has one entry
@@ -223,7 +228,7 @@ bool ViewManager::receive_configuration(node_id_t my_id, tcp::socket& leader_con
         std::size_t size_of_derecho_params;
         success = leader_connection.read(size_of_derecho_params);
         char buffer2[size_of_derecho_params];
-        success = leader_connection.read(buffer2, size_of_derecho_params);
+        success = success && leader_connection.read(buffer2, size_of_derecho_params);
         if(!success) {
             throw derecho_exception("Leader crashed before it could send the initial View! Try joining again at the new leader.");
         }
@@ -252,6 +257,23 @@ bool ViewManager::receive_configuration(node_id_t my_id, tcp::socket& leader_con
         }
         whenlog(logger->debug("Received view {} from leader. View_confirmed = {}", curr_view->vid, view_confirmed););
     }
+    //Once the View is committed, receive the GroupAdmin object
+    //This is the same logic as in Group::receive_objects(), but it must run before the Group is finished being constructed
+    ReplicatedObject& group_admin_handle = subgroup_objects.at(0);
+    if(group_admin_handle.is_persistent()) {
+        int64_t log_tail_length = group_admin_handle.get_minimum_latest_persisted_version();
+        leader_connection.write(log_tail_length);
+    }
+    std::size_t admin_object_buffer_size;
+    leader_connection.read(admin_object_buffer_size);
+    char admin_object_buffer[admin_object_buffer_size];
+    bool success = leader_connection.read(admin_object_buffer, admin_object_buffer_size);
+    if(!success) {
+        throw derecho_exception("Leader crashed while sending the Group management object!");
+    }
+    group_admin_handle.receive_object(admin_object_buffer);
+    //Note, get_admin_object() only returns a non-null pointer after receive_object has run
+    get_admin_object()->set_subgroup_initialization_order(subgroup_initialization_order);
     return is_total_restart;
 }
 
@@ -366,7 +388,7 @@ void ViewManager::await_first_view(const node_id_t my_id,
                                    uint32_t& num_received_size) {
     std::map<node_id_t, tcp::socket> waiting_join_sockets;
     std::set<node_id_t> members_sent_view;
-    curr_view->is_adequately_provisioned = false;
+    bool is_adequately_provisioned = false;
     bool joiner_failed = false;
     do {
         while(!curr_view->is_adequately_provisioned) {
@@ -392,14 +414,17 @@ void ViewManager::await_first_view(const node_id_t my_id,
             //None of these views are ever installed, so we don't use curr_view/next_view like normal
             //If we're here because a joiner failed, the subgroup functions have previously run to completion,
             //so preserve next_unassigned_rank.
-            int next_unassigned_rank = joiner_failed ? curr_view->next_unassigned_rank : 0;
+//            int next_unassigned_rank = joiner_failed ? curr_view->next_unassigned_rank : 0;
             curr_view = std::make_unique<View>(curr_view->vid,
                                                functional_append(curr_view->members, joiner_id),
-                                               functional_append(curr_view->member_ips_and_ports, {joiner_ip, joiner_gms_port, joiner_rpc_port, joiner_sst_port, joiner_rdmc_port}),
+                                               functional_append(curr_view->member_ips_and_ports,
+                                                                 {joiner_ip, joiner_gms_port, joiner_rpc_port, joiner_sst_port, joiner_rdmc_port}),
                                                std::vector<char>(curr_view->num_members + 1, 0),
                                                functional_append(curr_view->joined, joiner_id),
-                                               std::vector<node_id_t>{}, 0, next_unassigned_rank);
-            num_received_size = make_subgroup_maps(subgroup_info, std::unique_ptr<View>(), *curr_view, subgroup_settings);
+                                               std::vector<node_id_t>{}, 0);
+            is_adequately_provisioned = make_subgroup_maps(*get_admin_object(), subgroup_initialization_order,
+                                                           std::unique_ptr<View>(), *curr_view,
+                                                           subgroup_settings, num_received_size);
             waiting_join_sockets.emplace(joiner_id, std::move(client_socket));
             whenlog(logger->debug("Node {} connected from IP address {} and GMS port {}", joiner_id, joiner_ip, joiner_gms_port););
         }
@@ -446,18 +471,17 @@ void ViewManager::await_first_view(const node_id_t my_id,
                                  filtered_ips_and_ports.begin(), curr_view->member_ips_and_ports[curr_view->rank_of(failed_joiner_id)]);
                 std::remove_copy(curr_view->joined.begin(), curr_view->joined.end(),
                                  filtered_joiners.begin(), failed_joiner_id);
-                /* Since curr_view was adequate, it already had subgroups assigned and had the next_unassigned_rank
-                 * pointer moved by the subgroup allocation functions. Ideally we should tell the subgroup functions
-                 * to "forget" their previous assignment and reset next_unassigned_rank to 0, because that assignment
-                 * was never installed or used, but for now, decrement it by 1 if the failed node was assigned to a
-                 * subgroup (just like in make_next_view). */
-                int next_unassigned_rank = (curr_view->rank_of(failed_joiner_id) <= curr_view->next_unassigned_rank) ? curr_view->next_unassigned_rank - 1 : curr_view->next_unassigned_rank;
+                //Reset the data used by the allocator function, because the
+                //membership it decided on will not be installed
+                get_admin_object()->reset_subgroup_membership_state();
                 curr_view = std::make_unique<View>(0, filtered_members, filtered_ips_and_ports,
                                                    std::vector<char>(curr_view->num_members - 1, 0), filtered_joiners,
-                                                   std::vector<node_id_t>{}, 0, next_unassigned_rank);
-                /* This will update curr_view->is_adequately_provisioned, so set joiner_failed to true
+                                                   std::vector<node_id_t>{}, 0);
+                /* This will update is_adequately_provisioned, so set joiner_failed to true
                  * to start over from the beginning and test if we need to wait for more joiners. */
-                num_received_size = make_subgroup_maps(subgroup_info, std::unique_ptr<View>(), *curr_view, subgroup_settings);
+                is_adequately_provisioned = make_subgroup_maps(*get_admin_object(), subgroup_initialization_order,
+                                                               std::unique_ptr<View>(), *curr_view,
+                                                               subgroup_settings, num_received_size);
                 waiting_join_sockets.erase(waiting_sockets_iter);
                 joiner_failed = true;
                 break;
@@ -472,7 +496,19 @@ void ViewManager::await_first_view(const node_id_t my_id,
     } while(joiner_failed);
     whenlog(logger->trace("Decided on initial view: {}", curr_view->debug_string()););
     //At this point, we have successfully sent an initial view to all joining nodes
-    //Now send a "0" as the size of the "old shard leaders" vector, since there are no old leaders, and close the socket
+    //Now send the state of the GroupAdmin object to them, so that they all arrive at the same subgroup assignment
+    //This is exactly the same logic as in send_subgroup_object, but uses the waiting_join_sockets
+    //instead of the tcp connections pool
+    ReplicatedObject& replicated_group_admin = subgroup_objects.at(0); //GroupAdmin is always subgroup 0
+    for(auto& join_socket_pair : waiting_join_sockets) {
+        if(replicated_group_admin.is_persistent()) {
+            int64_t persistent_log_length = 0;
+            join_socket_pair.second.read(persistent_log_length);
+            PersistentRegistry::setEarliestVersionToSerialize(persistent_log_length);
+        }
+        replicated_group_admin.send_object(join_socket_pair.second);
+    }
+    //Finally, send a "0" as the size of the "old shard leaders" vector, since there are no old leaders, and close the socket
     for(auto waiting_sockets_iter = waiting_join_sockets.begin();
         waiting_sockets_iter != waiting_join_sockets.end();) {
         waiting_sockets_iter->second.write(std::size_t{0});
@@ -483,7 +519,9 @@ void ViewManager::await_first_view(const node_id_t my_id,
 void ViewManager::await_rejoining_nodes(const node_id_t my_id,
                                         std::map<subgroup_id_t, SubgroupSettings>& subgroup_settings,
                                         uint32_t& num_received_size) {
-    RestartLeaderState restart_leader_state_machine(std::move(curr_view), *restart_state, subgroup_settings, num_received_size, subgroup_info, my_id);
+    RestartLeaderState restart_leader_state_machine(std::move(curr_view), *restart_state,
+                                                    subgroup_settings, num_received_size,
+                                                    *get_admin_object(), subgroup_initialization_order, my_id);
     bool still_need_quorum = true;
     while(still_need_quorum) {
         restart_leader_state_machine.await_quorum(server_socket);
@@ -528,6 +566,7 @@ void ViewManager::await_rejoining_nodes(const node_id_t my_id,
     whenlog(logger->trace("Decided on restart view: {}", restart_leader_state_machine.get_restart_view().debug_string()););
     //Commit the restart view at all joining clients
     restart_leader_state_machine.confirm_restart_view(true);
+    restart_leader_state_machine.send_admin_object(subgroup_objects.at(0)); //GroupAdmin is always subgroup 0
     restart_leader_state_machine.send_shard_leaders();
     curr_view = restart_leader_state_machine.take_restart_view();
 }
@@ -845,8 +884,10 @@ void ViewManager::terminate_epoch(
     next_view = make_next_view(curr_view, gmsSST whenlog(, logger));
     whenlog(logger->debug("Checking provisioning of view {}", next_view->vid););
     next_subgroup_settings->clear();
-    next_num_received_size = make_subgroup_maps(subgroup_info, curr_view, *next_view, *next_subgroup_settings);
-    if(!next_view->is_adequately_provisioned) {
+    bool is_adequately_provisioned = make_subgroup_maps(*get_admin_object(), subgroup_initialization_order,
+                                                        curr_view, *next_view,
+                                                        *next_subgroup_settings, next_num_received_size);
+    if(!is_adequately_provisioned) {
         whenlog(logger->debug("Next view would not be adequately provisioned, waiting for more joins."););
         if(first_call) {
             // Re-register the predicates for accepting and acknowledging joins
@@ -1335,30 +1376,36 @@ uint32_t ViewManager::compute_num_received_size(const View& view) {
     return num_received_size;
 }
 
-uint32_t ViewManager::make_subgroup_maps(const SubgroupInfo& subgroup_info,
-                                         const std::unique_ptr<View>& prev_view, View& curr_view,
-                                         std::map<subgroup_id_t, SubgroupSettings>& subgroup_settings) {
+bool ViewManager::make_subgroup_maps(GroupAdmin& group_admin,
+                                     const std::vector<std::type_index>& subgroup_type_order,
+                                     const std::unique_ptr<View>& prev_view, View& curr_view,
+                                     std::map<subgroup_id_t, SubgroupSettings>& subgroup_settings,
+                                     int& num_received_size) {
     uint32_t num_received_offset = 0;
     int32_t initial_next_unassigned_rank = curr_view.next_unassigned_rank;
     curr_view.subgroup_shard_views.clear();
     curr_view.subgroup_ids_by_type.clear();
-    for(const auto& subgroup_type : subgroup_info.membership_function_order) {
+    bool first_subgroup_type = true;
+    for(const auto& subgroup_type : subgroup_type_order) {
         subgroup_shard_layout_t curr_type_subviews;
-        // This is the only place the subgroup membership functions are called; the results are then saved in the View
-        try {
-            auto temp = subgroup_info.subgroup_membership_functions.at(subgroup_type)(
-                    curr_view, curr_view.next_unassigned_rank);
-            // Hack to ensure RVO still works even though curr_type_subviews had to be declared outside this scope
-            curr_type_subviews = std::move(temp);
-        } catch(subgroup_provisioning_exception& ex) {
-            // Mark the view as inadequate and roll back everything done by previous
-            // allocation functions
-            curr_view.is_adequately_provisioned = false;
-            curr_view.next_unassigned_rank = initial_next_unassigned_rank;
-            curr_view.subgroup_shard_views.clear();
-            curr_view.subgroup_ids_by_type.clear();
-            subgroup_settings.clear();
-            return 0;
+        if(first_subgroup_type) {
+            //The GroupAdmin subgroup is always the first one, and contains all the nodes as members
+            curr_type_subviews = {{curr_view.make_subview(curr_view.members)}};
+            first_subgroup_type = false;
+        } else {
+            try {
+                // This is the only place the subgroup membership functions are called; the results are then saved in the View
+                auto temp = group_admin.compute_subgroup_membership(subgroup_type, curr_view);
+                // Hack to ensure RVO still works even though curr_type_subviews had to be declared outside this scope
+                curr_type_subviews = std::move(temp);
+            } catch(subgroup_provisioning_exception& ex) {
+                // Roll back everything done by previous allocation functions
+                group_admin.next_unassigned_rank = initial_next_unassigned_rank;
+                curr_view.subgroup_shard_views.clear();
+                curr_view.subgroup_ids_by_type.clear();
+                subgroup_settings.clear();
+                return false;
+            }
         }
         std::size_t num_subgroups = curr_type_subviews.size();
         curr_view.subgroup_ids_by_type[subgroup_type] = std::vector<subgroup_id_t>(num_subgroups);

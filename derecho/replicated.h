@@ -26,6 +26,8 @@ using namespace persistent;
 
 namespace derecho {
 
+template <typename GroupAdmin, typename...>
+class Group;
 class _Group;
 class GroupReference;
 
@@ -67,6 +69,9 @@ public:
 
 template <typename T>
 class Replicated : public ReplicatedObject, public ITemporalQueryFrontierProvider {
+    //This should allow Group to access user_object_ptr for the GroupAdmin object
+    template <typename GroupAdmin, typename...>
+    friend class Group;
 private:
     /** persistent registry for persistent<t>
      */
@@ -101,9 +106,9 @@ private:
         if(is_valid()) {
             assert(dest_node != node_id);
             //Ensure a view change isn't in progress
-            std::shared_lock<std::shared_timed_mutex> view_read_lock(group_rpc_manager.view_manager.view_mutex);
+            std::shared_lock<std::shared_timed_mutex> view_read_lock(group_rpc_manager.view_manager->view_mutex);
             size_t size;
-            auto max_payload_size = group_rpc_manager.view_manager.curr_view->multicast_group->max_msg_size - sizeof(header);
+            auto max_payload_size = group_rpc_manager.view_manager->curr_view->multicast_group->max_msg_size - sizeof(header);
             auto return_pair = wrapped_this->template send<tag>(
                     [this, &is_query, &dest_node, &max_payload_size, &size](size_t _size) -> char* {
                         size = _size;
@@ -257,9 +262,9 @@ public:
                 pending_ptr = &send_return_struct.pending;
             };
 
-            std::shared_lock<std::shared_timed_mutex> view_read_lock(group_rpc_manager.view_manager.view_mutex);
-            group_rpc_manager.view_manager.view_change_cv.wait(view_read_lock, [&]() {
-                if(!group_rpc_manager.view_manager.curr_view
+            std::shared_lock<std::shared_timed_mutex> view_read_lock(group_rpc_manager.view_manager->view_mutex);
+            group_rpc_manager.view_manager->view_change_cv.wait(view_read_lock, [&]() {
+                if(!group_rpc_manager.view_manager->curr_view
                             ->multicast_group->send(subgroup_id, msg_size, serializer, true)) {
                     return false;
                 }
@@ -303,7 +308,7 @@ public:
     }
 
     const uint64_t compute_global_stability_frontier() {
-        return group_rpc_manager.view_manager.compute_global_stability_frontier(subgroup_id);
+        return group_rpc_manager.view_manager->compute_global_stability_frontier(subgroup_id);
     }
 
     inline const HLC getFrontier() {
@@ -328,7 +333,7 @@ public:
      * for a consistent API. There's no direct cooked send function anyway
      */
     void send(unsigned long long int payload_size, const std::function<void(char* buf)>& msg_generator) {
-        group_rpc_manager.view_manager.send(subgroup_id, payload_size, msg_generator);
+        group_rpc_manager.view_manager->send(subgroup_id, payload_size, msg_generator);
     }
 
     /**
@@ -463,9 +468,9 @@ private:
         if(is_valid()) {
             assert(dest_node != node_id);
             //Ensure a view change isn't in progress
-            std::shared_lock<std::shared_timed_mutex> view_read_lock(group_rpc_manager.view_manager.view_mutex);
+            std::shared_lock<std::shared_timed_mutex> view_read_lock(group_rpc_manager.view_manager->view_mutex);
             size_t size;
-            auto max_payload_size = group_rpc_manager.view_manager.curr_view->multicast_group->max_msg_size - sizeof(header);
+            auto max_payload_size = group_rpc_manager.view_manager->curr_view->multicast_group->max_msg_size - sizeof(header);
             auto return_pair = wrapped_this->template send<tag>(
                     [this, &is_query, &dest_node, &max_payload_size, &size](size_t _size) -> char* {
                         size = _size;

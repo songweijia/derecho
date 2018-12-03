@@ -11,29 +11,17 @@
 #include "derecho_internal.h"
 #include "derecho_modes.h"
 #include "subgroup_info.h"
+#include "container_template_functions.h"
+
+#include <mutils-serialization/SerializationSupport.hpp>
 
 namespace derecho {
 
-/**
- * A copy constructor for objects owned by unique_ptr. Does the obvious thing
- * and invokes the copy constructor of the object being pointed to, or returns
- * nullptr if the unique_ptr is empty.
- * @param to_copy A unique_ptr to the object to copy
- * @return A new object in a new unique_ptr that is a copy of the old object.
- */
-template <typename T>
-std::unique_ptr<T> deep_pointer_copy(const std::unique_ptr<T>& to_copy) {
-    if(to_copy) {
-        return std::make_unique<T>(*to_copy);
-    } else {
-        return nullptr;
-    }
-}
 
 subgroup_shard_layout_t one_subgroup_entire_view(const View& curr_view, int& next_unassigned_rank);
 subgroup_shard_layout_t one_subgroup_entire_view_raw(const View& curr_view, int& next_unassigned_rank);
 
-struct ShardAllocationPolicy {
+struct ShardAllocationPolicy : public mutils::ByteRepresentable {
     /** The number of shards; set to 1 for a non-sharded subgroup */
     int num_shards;
     /** Whether all shards should contain the same number of members. */
@@ -52,9 +40,21 @@ struct ShardAllocationPolicy {
      * indicating which delivery mode it should use. (Ignored if even_shards is
      * true). */
     std::vector<Mode> modes_by_shard;
+
+    ShardAllocationPolicy(int num_shards, bool even_shards, int nodes_per_shard,
+                          Mode shards_mode, const std::vector<int>& num_nodes_by_shard,
+                          const std::vector<Mode>& modes_by_shard)
+    : num_shards(num_shards),
+      even_shards(even_shards),
+      nodes_per_shard(nodes_per_shard),
+      shards_mode(shards_mode),
+      num_nodes_by_shard(num_nodes_by_shard),
+      modes_by_shard(modes_by_shard) {}
+
+    DEFAULT_SERIALIZATION_SUPPORT(ShardAllocationPolicy, num_shards, even_shards, nodes_per_shard, shards_mode, num_nodes_by_shard, modes_by_shard);
 };
 
-struct SubgroupAllocationPolicy {
+struct SubgroupAllocationPolicy : public mutils::ByteRepresentable {
     /** The number of subgroups of the same Replicated type to create */
     int num_subgroups;
     /** Whether all subgroups of this type will have an identical shard layout */
@@ -63,6 +63,15 @@ struct SubgroupAllocationPolicy {
      * policy for all subgroups of this type. If identical_subgroups is false,
      * contains an entry for each subgroup describing that subgroup's shards. */
     std::vector<ShardAllocationPolicy> shard_policy_by_subgroup;
+
+    SubgroupAllocationPolicy(int num_subgroups,
+                             bool identical_subgroups,
+                             const std::vector<ShardAllocationPolicy>& shard_policy_by_subgroup)
+      : num_subgroups(num_subgroups),
+        identical_subgroups(identical_subgroups),
+        shard_policy_by_subgroup(shard_policy_by_subgroup) {}
+
+    DEFAULT_SERIALIZATION_SUPPORT(SubgroupAllocationPolicy, num_subgroups, identical_subgroups, shard_policy_by_subgroup);
 };
 
 /* Helper functions that construct ShardAllocationPolicy values for common cases. */
@@ -115,30 +124,6 @@ SubgroupAllocationPolicy one_subgroup_policy(const ShardAllocationPolicy& policy
  * copies of the same subgroup.
  */
 SubgroupAllocationPolicy identical_subgroups_policy(int num_subgroups, const ShardAllocationPolicy& subgroup_policy);
-
-/**
- * Functor of type shard_view_generator_t that implements the default subgroup
- * allocation algorithm, parameterized based on a SubgroupAllocationPolicy. Its
- * operator() will throw a subgroup_provisioning_exception if there are not
- * enough nodes in the current view to populate all of the subgroups and shards.
- */
-class DefaultSubgroupAllocator {
-protected:
-    std::unique_ptr<subgroup_shard_layout_t> previous_assignment;
-    const SubgroupAllocationPolicy policy;
-
-    bool assign_subgroup(const View& curr_view, int& next_unassigned_rank, const ShardAllocationPolicy& subgroup_policy);
-
-public:
-    DefaultSubgroupAllocator(const SubgroupAllocationPolicy& allocation_policy)
-            : policy(allocation_policy) {}
-    DefaultSubgroupAllocator(const DefaultSubgroupAllocator& to_copy)
-            : previous_assignment(deep_pointer_copy(to_copy.previous_assignment)),
-              policy(to_copy.policy) {}
-    DefaultSubgroupAllocator(DefaultSubgroupAllocator&&) = default;
-
-    subgroup_shard_layout_t operator()(const View& curr_view, int& next_unassigned_rank);
-};
 
 struct CrossProductPolicy {
     /** The (type, index) pair identifying the "source" subgroup of the cross-product.

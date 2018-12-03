@@ -65,6 +65,7 @@ std::exception_ptr RPCManager::parse_and_receive(char* buf, std::size_t size,
 }
 
 void RPCManager::rpc_message_handler(subgroup_id_t subgroup_id, node_id_t sender_id, char* msg_buf, uint32_t payload_size) {
+    assert(view_manager != nullptr);
     // WARNING: This assumes the current view doesn't change during execution! (It accesses curr_view without a lock).
     // extract the destination vector
     size_t dest_size = ((size_t*)msg_buf)[0];
@@ -96,17 +97,17 @@ void RPCManager::rpc_message_handler(subgroup_id_t subgroup_id, node_id_t sender
         });
         if(sender_id == nid) {
             //This is a self-receive of an RPC message I sent, so I have a reply-map that needs fulfilling
-            int my_shard = view_manager.curr_view->multicast_group->get_subgroup_settings().at(subgroup_id).shard_num;
+            int my_shard = view_manager->curr_view->my_subgroups.at(subgroup_id);
             std::unique_lock<std::mutex> lock(pending_results_mutex);
             // because of a race condition, toFulfillQueue can genuinely be empty
             // so we shouldn't assert that it is empty
             // instead we should sleep on a condition variable and let the main thread that called the orderedSend signal us
-	    // although the race condition is infinitely rare
+            // although the race condition is infinitely rare
             pending_results_cv.wait(lock, [&]() { return !toFulfillQueue.empty(); });
             // whenlog(logger->trace("Calling fulfill_map on toFulfillQueue.front(), its size is {}", toFulfillQueue.size());)
             //We now know the membership of "all nodes in my shard of the subgroup" in the current view
             toFulfillQueue.front().get().fulfill_map(
-                    view_manager.curr_view->subgroup_shard_views.at(subgroup_id).at(my_shard).members);
+                    view_manager->curr_view->subgroup_shard_views.at(subgroup_id).at(my_shard).members);
             fulfilledList.push_back(std::move(toFulfillQueue.front()));
             toFulfillQueue.pop();
             // whenlog(logger->trace("Popped a PendingResults from toFulfillQueue, size is now {}", toFulfillQueue.size());)
@@ -171,7 +172,7 @@ int RPCManager::populate_nodelist_header(const std::vector<node_id_t>& dest_node
     }
     //Two return values: the size of the header we just created,
     //and the maximum payload size based on that
-    max_payload_size = view_manager.curr_view->multicast_group->max_msg_size - sizeof(derecho::header) - header_size;
+    max_payload_size = getConfUInt64(CONF_DERECHO_MAX_PAYLOAD_SIZE) - header_size;
     return header_size;
 }
 
@@ -203,7 +204,7 @@ void RPCManager::finish_p2p_send(bool is_query, node_id_t dest_id, PendingBase& 
 
 void RPCManager::p2p_receive_loop() {
     pthread_setname_np(pthread_self(), "rpc_thread");
-    auto max_payload_size = view_manager.curr_view->multicast_group->max_msg_size - sizeof(header);
+    uint64_t max_payload_size = getConfUInt64(CONF_DERECHO_MAX_PAYLOAD_SIZE);
     while(!thread_start) {
         std::unique_lock<std::mutex> lock(thread_start_mutex);
         thread_start_cv.wait(lock, [this]() { return thread_start; });

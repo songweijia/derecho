@@ -53,7 +53,12 @@ class RPCManager {
     friend class ::derecho::Replicated;  //Give only Replicated access to view_manager
     template <typename T>
     friend class ::derecho::ExternalCaller;
-    ViewManager& view_manager;
+    /** A non-owning pointer to the ViewManager that resides in the same Group
+     * as this RPCManager. This will never be null after it is set, because
+     * ViewManager is stored by value in the Group. It should be a reference,
+     * but we can't set it in the constructor because that would create a
+     * circular dependency between ViewManager and RPCManager's constructors. */
+    ViewManager* view_manager;
 
     /** Contains an RDMA connection to each member of the group. */
     std::unique_ptr<sst::P2PConnections> connections;
@@ -122,17 +127,27 @@ class RPCManager {
                                          const std::function<char*(int)>& out_alloc);
 
 public:
-    RPCManager(ViewManager& group_view_manager)
+    RPCManager()
             : nid(getConfUInt32(CONF_DERECHO_LOCAL_ID)),
               receivers(new std::decay_t<decltype(*receivers)>()),
               whenlog(logger(spdlog::get("derecho_debug_log")), )
-              view_manager(group_view_manager),
-              connections(std::make_unique<sst::P2PConnections>(sst::P2PParams{nid, {nid}, group_view_manager.derecho_params.window_size, group_view_manager.derecho_params.max_payload_size})),
-              replySendBuffer(new char[group_view_manager.derecho_params.max_payload_size]) {
+              view_manager(nullptr),
+              connections(std::make_unique<sst::P2PConnections>(sst::P2PParams{nid, {nid}, getConfUInt32(CONF_DERECHO_WINDOW_SIZE), getConfUInt64(CONF_DERECHO_MAX_PAYLOAD_SIZE)})),
+              replySendBuffer(new char[getConfUInt64(CONF_DERECHO_MAX_PAYLOAD_SIZE)]) {
         rpc_thread = std::thread(&RPCManager::p2p_receive_loop, this);
     }
 
     ~RPCManager();
+
+    /**
+     * Finishes constructing RPCManager by giving it a pointer to its colocated
+     * ViewManager. This should be called as soon as possible after ViewManager
+     * exists in the Group. (Note that the parameter is a const reference, and
+     * the function internally takes the address, so that this cannot be used
+     * to set the view_manager pointer to null).
+     * @param group_view_manager The ViewManager in the same Group as this RPCManager
+     */
+    void set_view_manager(const ViewManager& group_view_manager) { view_manager = &group_view_manager; }
 
     /**
      * Starts the thread that listens for incoming P2P RPC requests over the RDMA P2P

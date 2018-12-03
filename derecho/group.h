@@ -24,6 +24,7 @@
 #include "rpc_manager.h"
 #include "subgroup_info.h"
 #include "view_manager.h"
+#include "group_admin.h"
 
 #include "conf/conf.hpp"
 #include "mutils-containers/KindMap.hpp"
@@ -96,15 +97,24 @@ public:
 };
 
 /**
+ * Group is always a partial specialization of a template, because the first
+ * Replicated Type must always be GroupAdmin. This unspecialized "base template"
+ * is never defined but must be declared.
+ */
+template <typename GroupAdmin, typename...>
+class Group;
+
+/**
  * The top-level object for creating a Derecho group. This implements the group
  * management service (GMS) features and contains a MulticastGroup instance that
  * manages the actual sending and tracking of messages within the group.
  * @tparam ReplicatedTypes The types of user-provided objects that will represent
  * state and RPC functions for subgroups of this group.
  */
-template <typename... ReplicatedTypes>
-class Group : public virtual _Group, public GroupProjection<RawObject>, public GroupProjection<ReplicatedTypes>... {
+template <typename ExtendedAdmin, typename... ReplicatedTypes>
+class Group : public virtual _Group, public GroupProjection<RawObject>, public GroupProjection<GroupAdmin>, public GroupProjection<ReplicatedTypes>... {
 public:
+    static_assert(std::is_base_of<GroupAdmin, ExtendedAdmin>::value,"Error: First parameter must extend GroupAdmin");
     void set_replicated_pointer(std::type_index type, uint32_t subgroup_num, void** ret);
 
 private:
@@ -123,26 +133,27 @@ private:
     std::optional<tcp::socket> leader_connection;
     /** Persist the objects. Once persisted, persistence_manager updates the SST
      * so that the persistent progress is known by group members. */
-    PersistenceManager<ReplicatedTypes...> persistence_manager;
+    PersistenceManager<ExtendedAdmin, ReplicatedTypes...> persistence_manager;
     /** Contains a TCP connection to each member of the group, for the purpose
      * of transferring state information to new members during a view change.
      * This connection pool is shared between Group and ViewManager */
     std::shared_ptr<tcp::tcp_connections> tcp_sockets;
-    /** Contains all state related to managing Views, including the
-     * MulticastGroup and SST (since those change when the view changes). */
-    ViewManager view_manager;
     /** Contains all state related to receiving and handling RPC function
      * calls for any Replicated objects implemented by this group. */
     rpc::RPCManager rpc_manager;
+    std::unique_ptr<std::unique_ptr<ExtendedAdmin>>& admin_object_ptr;
+    /** Contains all state related to managing Views, including the
+     * MulticastGroup and SST (since those change when the view changes). */
+    ViewManager view_manager;
     /** Maps a type to the Factory for that type. */
-    mutils::KindMap<Factory, ReplicatedTypes...> factories;
+    mutils::KindMap<Factory, ExtendedAdmin, ReplicatedTypes...> factories;
     /** Maps each type T to a map of (index -> Replicated<T>) for that type's
      * subgroup(s). If this node is not a member of a subgroup for a type, the
      * map will have no entry for that type and index. (Instead, external_callers
      * will have an entry for that type-index pair). If this node is a member
      * of a subgroup, the Replicated<T> will refer to the one shard that this
      * node belongs to. */
-    mutils::KindMap<replicated_index_map, ReplicatedTypes...> replicated_objects;
+    mutils::KindMap<replicated_index_map, ExtendedAdmin, ReplicatedTypes...> replicated_objects;
     /** Maps subgroup index -> RawSubgroup for the subgroups of type RawObject.
      * If this node is not a member of RawObject subgroup i, the RawSubgroup at
      * index i will be invalid; otherwise, the RawObject will refer to the one
@@ -192,12 +203,14 @@ private:
      */
     void receive_objects(const std::set<std::pair<subgroup_id_t, node_id_t>>& subgroups_and_leaders);
 
-    /** Constructor helper that wires together the component objects of Group. */
-    void set_up_components();
-
     /** A new-view callback that adds and removes TCP connections from the pool
      * of long-standing TCP connections to each member (used mostly by RPCManager). */
     void update_tcp_connections_callback(const View& new_view);
+
+    std::unique_ptr<std::unique_ptr<ExtendedAdmin>>& construct_admin_object(Factory<ExtendedAdmin>& admin_factory);
+
+    /** Constructor helper that wires together the component objects of Group. */
+    void set_up_components();
 
     /**
      * Constructor helper that constructs RawSubgroup objects for each subgroup
@@ -246,10 +259,10 @@ private:
 
 public:
     /**
-     * Constructor that starts a new managed Derecho group with this node as
-     * the leader. The DerechoParams will be passed through to construct
-     * the underlying DerechoGroup. If they specify a filename, the group will
-     * run in persistent mode and log all messages to disk.
+     * Constructor that starts a new Derecho group. This can be called by both
+     * the initial group leader and non-leader nodes, and the configuration
+     * parameters (specified in the Derecho config file) will be used to
+     * determine whether this node runs as a leader or non-leader.
      *
      * @param callbacks The set of callback functions for message delivery
      * events in this group.
@@ -264,6 +277,7 @@ public:
     Group(const CallbackSet& callbacks,
           const SubgroupInfo& subgroup_info,
           std::vector<view_upcall_t> _view_upcalls = {},
+          Factory<ExtendedAdmin> admin_factory,
           Factory<ReplicatedTypes>... factories);
 
     ~Group();

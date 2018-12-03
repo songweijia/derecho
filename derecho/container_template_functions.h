@@ -6,6 +6,7 @@
  */
 
 #pragma once
+#include <list>
 #include <map>
 #include <mutils-containers/KindMap.hpp>
 #include <set>
@@ -14,6 +15,7 @@
 #include "derecho_internal.h"
 
 namespace derecho {
+
 template <typename MapType>
 void kind_map_builder(MapType&){};
 
@@ -101,5 +103,36 @@ std::size_t multimap_size(const std::map<K1, std::map<K2, V>>& multimap) {
         count += map_pair.second.size();
     }
     return count;
+}
+
+/**
+ * A copy constructor for objects owned by unique_ptr. Does the obvious thing
+ * and invokes the copy constructor of the object being pointed to, or returns
+ * nullptr if the unique_ptr is empty.
+ * @param to_copy A unique_ptr to the object to copy
+ * @return A new object in a new unique_ptr that is a copy of the old object.
+ */
+template <typename T>
+std::unique_ptr<T> deep_pointer_copy(const std::unique_ptr<T>& to_copy) {
+    if(to_copy) {
+        return std::make_unique<T>(*to_copy);
+    } else {
+        return nullptr;
+    }
+}
+
+/**
+ * Constructs a std::list of the keys in a std::map, in the same order as they
+ * appear in the std::map.
+ * @param map A std::map
+ * @return A std::list containing a copy of each key in the map, in the same order
+ */
+template <typename K, typename V>
+std::list<K> keys_as_list(const std::map<K, V>& map) {
+    std::list<K> keys;
+    for(const auto& pair : map) {
+        keys.emplace_back(pair.first);
+    }
+    return keys;
 }
 }  // namespace derecho

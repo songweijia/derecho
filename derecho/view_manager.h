@@ -5,12 +5,14 @@
  */
 #pragma once
 
+#include <list>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
 #include <string>
 #include <thread>
+#include <typeindex>
 #include <vector>
 
 #include "conf/conf.hpp"
@@ -20,6 +22,7 @@
 #include "restart_state.h"
 #include "subgroup_info.h"
 #include "view.h"
+#include "group_admin.h"
 
 #include <mutils-serialization/SerializationSupport.hpp>
 #include <spdlog/spdlog.h>
@@ -153,10 +156,15 @@ private:
     /** Functions to be called whenever the view changes, to report the
      * new view to some other component. */
     std::vector<view_upcall_t> view_upcalls;
-    /** The subgroup membership functions, which will be called whenever the view changes. */
-    const SubgroupInfo subgroup_info;
     //Parameters stored here, in case we need them again after construction
     DerechoParams derecho_params;
+    /** Indicates the order that the subgroups should be provisioned;
+     * set by Group to be the same order as its template parameters. */
+    std::vector<std::type_index> subgroup_initialization_order;
+    /** A type-erased handle to a function in Group that gets a pointer to the
+     * GroupAdmin object. (This must be a raw pointer because the GroupAdmin
+     * object is actually owned by a Replicated). */
+    std::function<GroupAdmin*(void)> get_admin_object;
 
     /** The same set of TCP sockets used by Group and RPCManager. */
     std::shared_ptr<tcp::tcp_connections> group_member_sockets;
@@ -334,22 +342,30 @@ private:
      * Initializes curr_view with subgroup information based on the membership
      * functions in subgroup_info, and creates the subgroup-settings map that
      * MulticastGroup's constructor needs based on this information. If curr_view
-     * would be inadequate based on the subgroup allocation functions, it will
-     * be marked as inadequate and no subgroup settings will be provided.
-     * @param subgroup_info The SubgroupInfo (containing subgroup membership
-     * functions) to use to provision subgroups
+     * would be inadequate based on the subgroup allocation functions, the function
+     * will return false and no subgroup settings will be provided.
+     * @param group_admin The GroupAdmin object whose subgroup allocation function
+     * will be used to provision subgroups
+     * @param subgroup_type_order A list of std::type_index indicating the order
+     * that the subgroups should be provisioned
      * @param prev_view The previous View, which may be null if the current view
      * is the first one
      * @param curr_view A mutable reference to the current View, which will have
      * its SubViews initialized
      * @param subgroup_settings A mutable reference to the subgroup settings map,
      * which will be filled out
-     * @return num_received_size for the SST based on the computed subgroup membership
+     * @param num_received_size A mutable reference to num_received_size for the
+     * SST, which will be filled in based on the computed subgroup membership
+     * @return True if subgroup membership allocation succeeded and the View is
+     * adequately provisioned, False if some subgroup membership function failed
+     * and the View would be inadequately provisioned.
      */
-    static uint32_t make_subgroup_maps(const SubgroupInfo& subgroup_info,
-                                       const std::unique_ptr<View>& prev_view,
-                                       View& curr_view,
-                                       std::map<subgroup_id_t, SubgroupSettings>& subgroup_settings);
+    static bool make_subgroup_maps(GroupAdmin& group_admin,
+                                   const std::vector<std::type_index>& subgroup_type_order,
+                                   const std::unique_ptr<View>& prev_view,
+                                   View& curr_view,
+                                   std::map<subgroup_id_t, SubgroupSettings>& subgroup_settings,
+                                   int& num_received_size);
 
     /**
      * Creates the subgroup-settings map that MulticastGroup's constructor needs
@@ -407,14 +423,11 @@ private:
 
 public:
     /**
-     * Constructor for a new group where this node is the GMS leader.
-     * @param my_ip The IP address of the node executing this code
+     * Constructor for a new group where this node is the Group leader.
      * @param callbacks The set of callback functions for message delivery
      * events in this group.
      * @param subgroup_info The set of functions defining subgroup membership
      * for this group.
-     * @param derecho_params The assorted configuration parameters for this
-     * Derecho group instance, such as message size and logfile name
      * @param group_tcp_sockets The pool of TCP connections to each group member
      * that is shared with Group.
      * @param object_reference_map A mutable reference to the list of
@@ -425,7 +438,8 @@ public:
      * changes.
      */
     ViewManager(CallbackSet callbacks,
-                const SubgroupInfo& subgroup_info,
+                std::function<GroupAdmin*(void)> admin_object_getter,
+                const std::vector<std::type_index>& subgroup_type_order,
                 const std::shared_ptr<tcp::tcp_connections>& group_tcp_sockets,
                 ReplicatedObjectReferenceMap& object_reference_map,
                 const persistence_manager_callbacks_t& _persistence_manager_callbacks,
@@ -434,7 +448,6 @@ public:
     /**
      * Constructor for joining an existing group, assuming the caller has already
      * opened a socket to the group's leader.
-     * @param my_id The node ID of this node
      * @param leader_connection A Socket connected to the leader on its
      * group-management service port.
      * @param callbacks The set of callback functions for message delivery
@@ -453,7 +466,8 @@ public:
      */
     ViewManager(tcp::socket& leader_connection,
                 CallbackSet callbacks,
-                const SubgroupInfo& subgroup_info,
+                std::function<GroupAdmin*(void)> admin_object_getter,
+                const std::vector<std::type_index>& subgroup_type_order,
                 const std::shared_ptr<tcp::tcp_connections>& group_tcp_sockets,
                 ReplicatedObjectReferenceMap& object_reference_map,
                 const persistence_manager_callbacks_t& _persistence_manager_callbacks,

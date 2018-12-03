@@ -71,14 +71,16 @@ persistent::version_t RestartState::ragged_trim_to_latest_version(const int32_t 
 RestartLeaderState::RestartLeaderState(std::unique_ptr<View> _curr_view, RestartState& restart_state,
                                        std::map<subgroup_id_t, SubgroupSettings>& subgroup_settings_map,
                                        uint32_t& num_received_size,
-                                       const SubgroupInfo& subgroup_info,
+                                       GroupAdmin& group_admin,
+                                       const std::list<std::type_index>& subgroup_initialization_order,
                                        const node_id_t my_id)
         : whenlog(logger(spdlog::get("derecho_debug_log")), )
                   curr_view(std::move(_curr_view)),
           restart_state(restart_state),
           restart_subgroup_settings(subgroup_settings_map),
           restart_num_received_size(num_received_size),
-          subgroup_info(subgroup_info),
+          group_admin_object(group_admin),
+          subgroup_initialization_order(subgroup_initialization_order),
           last_known_view_members(curr_view->members.begin(), curr_view->members.end()),
           longest_log_versions(curr_view->subgroup_shard_views.size()),
           nodes_with_longest_log(curr_view->subgroup_shard_views.size()),
@@ -226,8 +228,10 @@ void RestartLeaderState::receive_joiner_logs(const node_id_t& joiner_id, tcp::so
 
 bool RestartLeaderState::compute_restart_view() {
     restart_view = update_curr_and_next_restart_view();
-    restart_num_received_size = ViewManager::make_subgroup_maps(subgroup_info, curr_view, *restart_view, restart_subgroup_settings);
-    if(restart_view->is_adequately_provisioned
+    bool is_adequately_provisioned = ViewManager::make_subgroup_maps(group_admin_object, subgroup_initialization_order,
+                                                                     curr_view, *restart_view,
+                                                                     restart_subgroup_settings, restart_num_received_size);
+    if(is_adequately_provisioned
        && contains_at_least_one_member_per_subgroup(rejoined_node_ids, *curr_view)) {
         return true;
     } else {
@@ -306,6 +310,27 @@ int64_t RestartLeaderState::send_restart_view(const DerechoParams& derecho_param
     return -1;
 }
 
+void RestartLeaderState::confirm_restart_view(const bool commit) {
+    for(const node_id_t& member_sent_view : members_sent_restart_view) {
+        whenlog(logger->debug("Sending view commit message to node {}: {}", member_sent_view, commit););
+        //Eventually it would be nice to check for failures here, but
+        //we probably won't detect a failure by writing one byte.
+        waiting_join_sockets.at(member_sent_view).write(commit);
+    }
+    members_sent_restart_view.clear();
+}
+
+void RestartLeaderState::send_admin_object(const ReplicatedObject& replicated_group_admin) {
+    for(auto& join_socket_pair : waiting_join_sockets) {
+        if(replicated_group_admin.is_persistent()) {
+            int64_t persistent_log_length = 0;
+            join_socket_pair.second.read(persistent_log_length);
+            PersistentRegistry::setEarliestVersionToSerialize(persistent_log_length);
+        }
+        replicated_group_admin.send_object(join_socket_pair.second);
+    }
+}
+
 void RestartLeaderState::send_shard_leaders() {
     for(auto waiting_sockets_iter = waiting_join_sockets.begin();
         waiting_sockets_iter != waiting_join_sockets.end();) {
@@ -323,15 +348,6 @@ void RestartLeaderState::send_shard_leaders() {
     }
 }
 
-void RestartLeaderState::confirm_restart_view(const bool commit) {
-    for(const node_id_t& member_sent_view : members_sent_restart_view) {
-        whenlog(logger->debug("Sending view commit message to node {}: {}", member_sent_view, commit););
-        //Eventually it would be nice to check for failures here, but
-        //we probably won't detect a failure by writing one byte.
-        waiting_join_sockets.at(member_sent_view).write(commit);
-    }
-    members_sent_restart_view.clear();
-}
 
 void RestartLeaderState::print_longest_logs() const {
     std::ostringstream leader_list;

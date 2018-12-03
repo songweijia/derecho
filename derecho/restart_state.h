@@ -8,8 +8,10 @@
 #include <vector>
 
 #include "derecho_internal.h"
+#include "group_admin.h"
 #include "subgroup_info.h"
 #include "view.h"
+#include "replicated.h"
 
 #include <mutils-serialization/SerializationSupport.hpp>
 #include <spdlog/spdlog.h>
@@ -79,7 +81,8 @@ private:
     RestartState& restart_state;
     std::map<subgroup_id_t, SubgroupSettings>& restart_subgroup_settings;
     uint32_t& restart_num_received_size;
-    const SubgroupInfo& subgroup_info;
+    GroupAdmin& group_admin_object;
+    const std::list<std::type_index>& subgroup_initialization_order;
 
     std::unique_ptr<View> restart_view;
     std::map<node_id_t, tcp::socket> waiting_join_sockets;
@@ -105,7 +108,8 @@ public:
     RestartLeaderState(std::unique_ptr<View> _curr_view, RestartState& restart_state,
                        std::map<subgroup_id_t, SubgroupSettings>& subgroup_settings_map,
                        uint32_t& num_received_size,
-                       const SubgroupInfo& subgroup_info,
+                       GroupAdmin& group_admin,
+                       const std::list<std::type_index>& subgroup_initialization_order,
                        const node_id_t my_id);
     /**
      * Waits for nodes to rejoin at this node, updating the last known View and
@@ -137,6 +141,15 @@ public:
      * @param commit
      */
     void confirm_restart_view(const bool commit);
+    /**
+     * Sends the replicated state of the GroupAdmin object to all members in the
+     * restart view. This object is a special case and must be synchronized before
+     * the other replicated objects, since it is used to determine the subgroup
+     * membership of the next view post-restart.
+     * @param replicated_group_admin The ReplicatedObject reference to the
+     * Replicated<T extends GroupAdmin> that resides in the Group
+     */
+    void send_admin_object(const ReplicatedObject& replicated_group_admin);
     /**
      * Sends the list of nodes from each shard that have the longest log (which
      * are the restart shard leaders, though they won't be shard leaders after
@@ -176,7 +189,7 @@ public:
     static std::unique_ptr<View> make_next_view(const std::unique_ptr<View>& curr_view,
                                                 const std::vector<node_id_t>& joiner_ids,
                                                 const std::vector<std::tuple<ip_addr_t, uint16_t, uint16_t, uint16_t, uint16_t>>& joiner_ips_and_ports
-                                                        whenlog(, std::shared_ptr<spdlog::logger> logger));
+                                                whenlog(, std::shared_ptr<spdlog::logger> logger));
     /**
      * @return true if the set of node IDs includes at least one member of each
      * subgroup in the given View.

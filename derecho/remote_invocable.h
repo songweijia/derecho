@@ -75,17 +75,23 @@ struct RemoteInvoker<Tag, std::function<Ret(Args...)>> {
         return serialize_one(v, args...);
     }
 
-    /**
-     * Return type for the send function. Contains the RPC-invoking message
-     * (in a buffer of size "size"), a set of futures for the results, and
-     * a set of promises for the results.
-     */
-    struct send_return {
-        std::size_t size;
-        char* buf;
-        QueryResults<Ret> results;
-        PendingResults<Ret>& pending;
-    };
+    auto get_query_and_pending_results() {
+        /**
+	 * Return type for the send function. Contains the RPC-invoking message
+	 * (in a buffer of size "size"), a set of futures for the results, and
+	 * a set of promises for the results.
+	 */
+        struct send_return {
+            long int invocation_id;
+            QueryResults<Ret> results;
+            PendingResults<Ret>& pending;
+        };
+	// generate the invocation id here, when the serializer calls send, it will provide this
+        auto invocation_id = mutils::long_rand();
+        // default-initialize the maps
+        PendingResults<Ret>& pending_results = results_map[invocation_id];
+	return send_return{invocation_id, pending_results.get_future(), pending_results};
+    }
 
     /**
      * Called to construct an RPC message to send that will invoke the remote-
@@ -94,9 +100,8 @@ struct RemoteInvoker<Tag, std::function<Ret(Args...)>> {
      * used to store the constructed message
      * @param a The arguments to be used when calling the remote-invocable function
      */
-    send_return send(const std::function<char*(int)>& out_alloc,
-                     const std::decay_t<Args>&... remote_args) {
-        auto invocation_id = mutils::long_rand();
+    std::pair<char*, std::size_t> send(long int invocation_id, const std::function<char*(int)>& out_alloc,
+                                       const std::decay_t<Args>&... remote_args) {
         std::size_t size = mutils::bytes_size(invocation_id);
         {
             auto t = {std::size_t{0}, std::size_t{0}, mutils::bytes_size(remote_args)...};
@@ -110,11 +115,8 @@ struct RemoteInvoker<Tag, std::function<Ret(Args...)>> {
         }
 
         lock_t l{map_lock};
-        // default-initialize the maps
-        PendingResults<Ret>& pending_results = results_map[invocation_id];
 
-        return send_return{size, serialized_args, pending_results.get_future(),
-                           pending_results};
+        return {serialized_args, size};
     }
 
     /**
@@ -557,6 +559,13 @@ public:
         return size;
     }
 
+    template <FunctionTag Tag, typename... Args>
+    auto get_query_and_pending_results(Args&&... args) {
+        constexpr std::integral_constant<FunctionTag, Tag>* choice{nullptr};
+        auto& invoker = this->get_invoker(choice, args...);
+        return invoker.get_query_and_pending_results();
+    }
+
     /**
      * Constructs a message that will remotely invoke a method of this class,
      * supplying the specified arguments, using RPC.
@@ -567,36 +576,20 @@ public:
      * results ("results"), and a set of corresponding promises for those
      * results ("pending").
      */
-    template <typename Ret>
-    struct _send_return {
-        using ret_t = Ret;
-        QueryResults<Ret> results;
-        PendingResults<Ret>& pending;
-        };
     template <FunctionTag Tag, typename... Args>
-    auto send(const std::function<char*(int)>& out_alloc, Args&&... args) {
+    void send(long int invocation_id, const std::function<char*(int)>& out_alloc, Args&&... args) {
         using namespace remote_invocation_utilities;
 
         constexpr std::integral_constant<FunctionTag, Tag>* choice{nullptr};
         auto& invoker = this->get_invoker(choice, args...);
         const auto header_size = header_space();
-        auto sent_return = invoker.send(
-                [&out_alloc, &header_size](std::size_t size) {
-                    return out_alloc(size + header_size) + header_size;
-                },
-                std::forward<Args>(args)...);
-
-        std::size_t payload_size = sent_return.size;
-        char* buf = sent_return.buf - header_size;
+        auto [buf, payload_size] = invoker.send(invocation_id,
+                                                [&out_alloc, &header_size](std::size_t size) {
+                                                    return out_alloc(size + header_size) + header_size;
+                                                },
+                                                std::forward<Args>(args)...);
+        buf -= header_size;
         populate_header(buf, payload_size, invoker.invoke_opcode, nid);
-
-        using Ret = typename decltype(sent_return.results)::type;
-        /*
-          much like previous definition, except with
-          two fewer fields
-        */
-        return _send_return<Ret>{std::move(sent_return.results),
-                           sent_return.pending};
     }
 
     using specialized_to = IdentifyingClass;
@@ -649,35 +642,27 @@ public:
             : RemoteInvokers<WrappedFuns...>(type_id, instance_id, rvrs),
               nid(nid) {}
 
-    template <typename Ret>
-    struct _send_return {
-        QueryResults<Ret> results;
-        PendingResults<Ret>& pending;
-    };
     template <FunctionTag Tag, typename... Args>
-    auto send(const std::function<char*(int)>& out_alloc, Args&&... args) {
+    auto get_query_and_pending_results(Args&&... args) {
+        constexpr std::integral_constant<FunctionTag, Tag>* choice{nullptr};
+        auto& invoker = this->get_invoker(choice, args...);
+        return invoker.get_query_and_pending_results();
+    }
+
+    template <FunctionTag Tag, typename... Args>
+    void send(long int invocation_id, const std::function<char*(int)>& out_alloc, Args&&... args) {
         using namespace remote_invocation_utilities;
 
         constexpr std::integral_constant<FunctionTag, Tag>* choice{nullptr};
         auto& invoker = this->get_invoker(choice, args...);
         const auto header_size = header_space();
-        auto sent_return = invoker.send(
-                [&out_alloc, &header_size](std::size_t size) {
-                    return out_alloc(size + header_size) + header_size;
-                },
-                std::forward<Args>(args)...);
-
-        std::size_t payload_size = sent_return.size;
-        char* buf = sent_return.buf - header_size;
+        auto [buf, payload_size] = invoker.send(invocation_id,
+                                                [&out_alloc, &header_size](std::size_t size) {
+                                                    return out_alloc(size + header_size) + header_size;
+                                                },
+                                                std::forward<Args>(args)...);
+        buf -= header_size;
         populate_header(buf, payload_size, invoker.invoke_opcode, nid);
-
-        using Ret = typename decltype(sent_return.results)::type;
-        /*
-          much like previous definition, except with
-          two fewer fields
-        */
-        return _send_return<Ret>{std::move(sent_return.results),
-                           sent_return.pending};
     }
 };
 

@@ -104,18 +104,20 @@ private:
             std::shared_lock<std::shared_timed_mutex> view_read_lock(group_rpc_manager.view_manager.view_mutex);
             size_t size;
             auto max_payload_size = group_rpc_manager.view_manager.curr_view->multicast_group->max_msg_size - sizeof(header);
-            auto return_pair = wrapped_this->template send<tag>(
-                    [this, &is_query, &dest_node, &max_payload_size, &size](size_t _size) -> char* {
-                        size = _size;
-                        if(size <= max_payload_size) {
-                            return (char*)group_rpc_manager.get_sendbuffer_ptr(dest_node, is_query ? sst::REQUEST_TYPE::P2P_QUERY : sst::REQUEST_TYPE::P2P_SEND);
-                        } else {
-                            return nullptr;
-                        }
-                    },
+            auto send_return_struct = wrapped_this->template get_query_and_pending_results<tag>(
                     std::forward<Args>(args)...);
-            group_rpc_manager.finish_p2p_send(is_query, dest_node, return_pair.pending);
-            return std::move(return_pair.results);
+            wrapped_this->template send<tag>(send_return_struct.invocation_id,
+                                             [this, &is_query, &dest_node, &max_payload_size, &size](size_t _size) -> char* {
+                                                 size = _size;
+                                                 if(size <= max_payload_size) {
+                                                     return (char*)group_rpc_manager.get_sendbuffer_ptr(dest_node, is_query ? sst::REQUEST_TYPE::P2P_QUERY : sst::REQUEST_TYPE::P2P_SEND);
+                                                 } else {
+                                                     return nullptr;
+                                                 }
+                                             },
+                                             std::forward<Args>(args)...);
+            group_rpc_manager.finish_p2p_send(is_query, dest_node, send_return_struct.pending);
+            return std::move(send_return_struct.results);
         } else {
             throw derecho::empty_reference_exception{"Attempted to use an empty Replicated<T>"};
         }
@@ -229,30 +231,29 @@ public:
     auto ordered_send(Args&&... args) {
         if(is_valid()) {
             size_t msg_size = wrapped_this->template get_size<tag>(std::forward<Args>(args)...);
-            using Ret = typename decltype(wrapped_this-> template send<tag>(std::declval<std::function<char*(int)>>(), args...))::ret_t;
-
-            // declare the QueryResults and PendingResults as a pointer outside
-            // serializer will be called inside multicast_group.cpp, in send
-            // but we need the object after that, outside the lambda
-            rpc::QueryResults<Ret> results_ptr;
-            rpc::PendingResults<Ret>* pending_ptr;
+	    // Get the query and pending results even before we serialize
+	    // this is fine as the invoker inside remote_invocable stores a map of pending results
+	    // calling this will create an entry in the map that will be reused later
+	    // also, technically this can be called after we call MulticastGroup::send
+	    // but since that send is asynchronous, there may be a race condition if the send
+	    // calls the serializer lambda and we call this function at the same time
+            auto send_return_struct = wrapped_this->template get_query_and_pending_results<tag>(
+                    std::forward<Args>(args)...);
 
             auto serializer = [&](char* buffer) {
                 std::size_t max_payload_size;
                 int buffer_offset = group_rpc_manager.populate_nodelist_header({}, buffer, max_payload_size);
                 buffer += buffer_offset;
 
-                auto send_return_struct = wrapped_this->template send<tag>(
-                        [&buffer, &max_payload_size](size_t size) -> char* {
-                            if(size <= max_payload_size) {
-                                return buffer;
-                            } else {
-                                return nullptr;
-                            }
-                        },
-                        std::forward<Args>(args)...);
-                results_ptr = rpc::QueryResults<Ret>(std::move(send_return_struct.results));
-                pending_ptr = &send_return_struct.pending;
+                wrapped_this->template send<tag>(send_return_struct.invocation_id,
+                                                 [&buffer, &max_payload_size](size_t size) -> char* {
+                                                     if(size <= max_payload_size) {
+                                                         return buffer;
+                                                     } else {
+                                                         return nullptr;
+                                                     }
+                                                 },
+                                                 std::forward<Args>(args)...);
             };
 
             std::shared_lock<std::shared_timed_mutex> view_read_lock(group_rpc_manager.view_manager.view_mutex);
@@ -261,10 +262,10 @@ public:
                             ->multicast_group->send(subgroup_id, msg_size, serializer, true)) {
                     return false;
                 }
-                group_rpc_manager.finish_rpc_send(*pending_ptr);
+                group_rpc_manager.finish_rpc_send(send_return_struct.pending);
                 return true;
             });
-            return std::move(results_ptr);
+            return std::move(send_return_struct.results);
         } else {
             throw derecho::empty_reference_exception{"Attempted to use an empty Replicated<T>"};
         }
@@ -462,9 +463,11 @@ private:
             assert(dest_node != node_id);
             //Ensure a view change isn't in progress
             std::shared_lock<std::shared_timed_mutex> view_read_lock(group_rpc_manager.view_manager.view_mutex);
+            auto send_return_struct = wrapped_this->template get_query_and_pending_results<tag>(
+                    std::forward<Args>(args)...);
             size_t size;
             auto max_payload_size = group_rpc_manager.view_manager.curr_view->multicast_group->max_msg_size - sizeof(header);
-            auto return_pair = wrapped_this->template send<tag>(
+            wrapped_this->template send<tag>(send_return_struct.invocation_id,
                     [this, &is_query, &dest_node, &max_payload_size, &size](size_t _size) -> char* {
                         size = _size;
                         if(size <= max_payload_size) {
@@ -474,8 +477,8 @@ private:
                         }
                     },
                     std::forward<Args>(args)...);
-            group_rpc_manager.finish_p2p_send(is_query, dest_node, return_pair.pending);
-            return std::move(return_pair.results);
+            group_rpc_manager.finish_p2p_send(is_query, dest_node, send_return_struct.pending);
+            return std::move(send_return_struct.results);
         } else {
             throw derecho::empty_reference_exception{"Attempted to use an empty Replicated<T>"};
         }

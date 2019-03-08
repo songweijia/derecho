@@ -49,18 +49,21 @@ int main(int argc, char* argv[]) {
 
     // the number of nodes for this test
     const uint32_t num_nodes = std::stoi(argv[1]);
-    const uint32_t num_params = std::stoi(argv[1]);
+    const uint32_t num_params = std::stoi(argv[2]);
 
     uint32_t my_id = getConfUInt32(CONF_DERECHO_LOCAL_ID);
     
-    std::cout << "Input the IP addresses" << std::endl;
-    // assume all have the same port
-    uint16_t port = getConfUInt16(CONF_DERECHO_SST_PORT);
+    // // assume all have the same port
+    // uint16_t port = getConfUInt16(CONF_DERECHO_SST_PORT);
+    // std::cout << "Port is: " << port << std::endl;
     // input the ip addresses
+    std::cout << "Input the IP addresses" << std::endl;
     std::map<uint32_t, std::pair<std::string, uint16_t>> ip_addrs_and_ports;
     for(uint i = 0; i < num_nodes; ++i) {
         std::string ip;
         std::cin >> ip;
+	uint16_t port;
+	std::cin >> port;
         ip_addrs_and_ports[i] = {ip, port};
     }
 
@@ -71,6 +74,8 @@ int main(int argc, char* argv[]) {
     lf_initialize(ip_addrs_and_ports, my_id);
 #endif
 
+    std::cout << "Finished the initialization" << std::endl;
+    
     // form a group with a subset of all the nodes
     std::vector<uint32_t> members(num_nodes);
     for(unsigned int i = 0; i < num_nodes; ++i) {

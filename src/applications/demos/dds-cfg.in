@@ -1,0 +1,15 @@
+[derecho]
+nodes_ips = 192.168.9.31,192.168.9.30,192.168.9.29,192.168.9.28,192.168.9.27,192.168.9.26,192.168.9.25,192.168.9.24
+leader_ip = 192.168.9.31
+rdma_provider = verbs
+rdma_domain = mlx5_0
+
+[objectstore]
+min_rep_factor = 3
+num_replicas = 3
+
+
+[dds]
+num_topics = 10
+num_consumers_per_replica = 3
+num_producers_per_client = 3

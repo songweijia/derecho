@@ -1,12 +1,12 @@
 [DERECHO]
 # leader ip - the leader's ip address
-leader_ip = 127.0.0.1
+leader_ip = @LEADER_IP@
 # leader gms port - the leader's gms port
 leader_gms_port = 23580
 # my local id - each node should have a difference id
-local_id = 0
+local_id = @LOCAL_ID@
 # my local ip address
-local_ip = 127.0.0.1
+local_ip = @LOCAL_IP@
 # derecho gms port
 gms_port = 23580
 # derecho rpc port
@@ -62,12 +62,12 @@ sst_poll_cq_timeout = 10000
 # udp     - The UDP Fabric Provider
 # usnic   - The usNIC Fabric Provider(Cisco VIC)
 # verbs   - The Verbs Fabric Provider
-provider = sockets
+provider = @PROVIDER@
 
 # 2. domain
 # For sockets provider, domain is the NIC name (ifconfig | grep -v -e "^ ")
 # For verbs provider, domain is the device name (ibv_devices)
-domain = eth0
+domain = @DOMAIN@
 
 # 3. tx_depth 
 # tx_depth applies to hints->tx_attr->size, where hint is a struct fi_info object.
@@ -100,23 +100,13 @@ default_log_level = info
 # NOTICE please append this to derecho.cfg
 
 [OBJECTSTORE]
-# 'replicas' is a list of nodes (ids) which are in the replica subgroup. The
-# node IDs are separated by comma(,). Hyphen is allowed for a range.
-# Examples:
-# replicas = 0,1,2
-# replicas = 0-2,9-10,12,30,100-105
-replicas = 0-2
-# 'persisted' controls the persistence of the ObjectStore. Set it to 'true' if
-# the data need to survive system restarts or failure. 
-persisted = false
-# 'logged' controls if the history is maintained. Set it to  'true' if access 
-# to history is required. NOTE: 'logged' only works with 'persisted' = true. 
+# minimum replication factor
+min_replication_factor = @MIN_REP_FACTOR@
+# number of replicas
+replicas = 0-@REPLICAS@
+# persistented ?
+persistent = false
+# logged ?
 logged = false
 
-[DDS_DEMO/producer]
-topics = topic1,topic2,topic3
-message_freq_hz = 1.0
-
-[DDS_DEMO/consumer]
-topics = topic1,topic2,topic3
 

@@ -749,8 +749,8 @@ public:
     }
 
     // blocking put
-    virtual std::tuple<version_t,uint64_t> bio_put(const Object& object, const bool& force_client) {
-        dbg_default_debug("bio_put object id={}, mode={}, force_client={}", object.oid, mode, force_client);
+    virtual std::tuple<version_t,uint64_t> put(const Object& object, const bool& force_client) {
+        dbg_default_debug("put object id={}, mode={}, force_client={}", object.oid, mode, force_client);
         std::tuple<version_t,uint64_t> vRet(INVALID_VERSION,0);
         switch(this->mode) {
             case VOLATILE_UNLOGGED:
@@ -807,8 +807,8 @@ public:
     }
 
     // blocking remove
-    virtual std::tuple<version_t,uint64_t> bio_remove(const OID& oid, const bool& force_client) {
-        dbg_default_debug("bio_remove object id={}, mode={}, force_client={}", oid, mode, force_client);
+    virtual std::tuple<version_t,uint64_t> remove(const OID& oid, const bool& force_client) {
+        dbg_default_debug("remove object id={}, mode={}, force_client={}", oid, mode, force_client);
         switch(this->mode) {
             case VOLATILE_UNLOGGED:
                 return this->template _bio_remove<VolatileUnloggedObjectStore>(oid, force_client);
@@ -885,8 +885,8 @@ public:
         return replies.begin()->second.get();
     }
 
-    virtual Object bio_get(const OID& oid, const version_t& ver, const bool& force_client) {
-        dbg_default_debug("bio_get object id={}, ver={}, mode={}, force_client={}", oid, ver, mode, force_client);
+    virtual Object get(const OID& oid, const version_t& ver, const bool& force_client) {
+        dbg_default_debug("get object id={}, ver={}, mode={}, force_client={}", oid, ver, mode, force_client);
         switch(this->mode) {
             case VOLATILE_UNLOGGED:
                 return this->template _bio_get<VolatileUnloggedObjectStore>(oid, ver, force_client);
@@ -898,8 +898,8 @@ public:
         }
     }
 
-    virtual Object bio_get(const OID& oid, const uint64_t& ts_us) {
-        dbg_default_debug("bio_get object id={}, ts_us={}.", oid, ts_us);
+    virtual Object get(const OID& oid, const uint64_t& ts_us) {
+        dbg_default_debug("get object id={}, ts_us={}.", oid, ts_us);
         switch(this->mode) {
             case VOLATILE_UNLOGGED:
                 return this->template _bio_get<VolatileUnloggedObjectStore>(oid, ts_us);

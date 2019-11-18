@@ -55,7 +55,7 @@ int main(int argc, char** argv) {
                                                << ", timestamp=" << std::get<1>(res) << std::endl;
                                  }
                              } else {
-                                 std::tuple<persistent::version_t,uint64_t> result = oss.bio_put(object);
+                                 std::tuple<persistent::version_t,uint64_t> result = oss.put(object);
                                  // synchronous api
                                  std::cout << "version:" << std::get<0>(result) 
                                            << ", timestamp:" << std::get<1>(result) << std::endl;
@@ -87,7 +87,7 @@ int main(int argc, char** argv) {
                                  }
                              } else {
                                  // synchronous api
-                                 objectstore::Object obj = oss.bio_get(oid, ver);
+                                 objectstore::Object obj = oss.get(oid, ver);
                                  std::cout << obj << std::endl;
                              }
                          } catch(...) {
@@ -116,7 +116,7 @@ int main(int argc, char** argv) {
                              }
                          } else {
                              // synchronous api
-                             objectstore::Object obj = oss.bio_get(oid, ts_us);
+                             objectstore::Object obj = oss.get(oid, ts_us);
                              std::cout << obj << std::endl;
                          }
                      } catch(...) {
@@ -140,7 +140,7 @@ int main(int argc, char** argv) {
                                                << ", timestamp=" << std::get<1>(res) << std::endl;
                                  }
                              } else {
-                                 std::tuple<version_t,uint64_t> ver = oss.bio_remove(std::stol(args));
+                                 std::tuple<version_t,uint64_t> ver = oss.remove(std::stol(args));
                                  std::cout << "version:" << std::get<0>(ver)
                                            << ", timestamp:" << std::get<1>(ver) << std::endl;
                              }

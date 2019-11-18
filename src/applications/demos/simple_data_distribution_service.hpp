@@ -74,7 +74,7 @@ public:
     }
     virtual bool write(const char* data, size_t len) {
         objectstore::Object object(this->oid,data,len);
-        oss.bio_put(object);
+        oss.put(object);
         return true;
     }
     virtual bool close() {

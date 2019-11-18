@@ -55,10 +55,10 @@ int main(int argc, char** argv) {
         }
     } else {
         for(int i = 0; i < num_msg; i++) {
-            oss.bio_put(objpool[i]);
+            oss.put(objpool[i]);
         }
     }
-    oss.bio_get(num_msg - 1);
+    oss.get(num_msg - 1);
     clock_gettime(CLOCK_REALTIME, &t_end);
 
     long long int nsec = (t_end.tv_sec - t_start.tv_sec) * 1000000000 + (t_end.tv_nsec - t_start.tv_nsec);
@@ -76,10 +76,10 @@ int main(int argc, char** argv) {
             }
         } else {
             for(int i = 0; i < num_msg * multiplier; i++) {
-                oss.bio_put(objpool[i % num_msg]);
+                oss.put(objpool[i % num_msg]);
             }
         }
-        oss.bio_get(num_msg - 1);
+        oss.get(num_msg - 1);
         clock_gettime(CLOCK_REALTIME, &t_end);
 
         nsec = (t_end.tv_sec - t_start.tv_sec) * 1000000000 + (t_end.tv_nsec - t_start.tv_nsec);

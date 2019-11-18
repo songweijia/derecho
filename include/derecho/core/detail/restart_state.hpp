@@ -38,7 +38,8 @@ struct RaggedTrim : public mutils::ByteRepresentable {
 enum class CommitMessage {
     PREPARE,  //!< PREPARE
     COMMIT,   //!< COMMIT
-    ABORT     //!< ABORT
+    ABORT,    //!< ABORT
+    ACK       //!< ACK
 };
 
 /**
@@ -86,7 +87,6 @@ private:
      * the restart state stored in ViewManager. */
     RestartState& restart_state;
     const SubgroupInfo& subgroup_info;
-    const DerechoParams& derecho_params;
 
     std::unique_ptr<View> restart_view;
     std::map<node_id_t, tcp::socket> waiting_join_sockets;
@@ -126,7 +126,7 @@ private:
 public:
     static const int RESTART_LEADER_TIMEOUT = 2000;
     RestartLeaderState(std::unique_ptr<View> _curr_view, RestartState& restart_state,
-                       const SubgroupInfo& subgroup_info, const DerechoParams& derecho_params,
+                       const SubgroupInfo& subgroup_info,
                        const node_id_t my_id);
     /**
      * Waits for nodes to rejoin at this node, updating the last known View and

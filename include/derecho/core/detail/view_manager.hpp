@@ -142,6 +142,13 @@ private:
     std::thread client_listener_thread;
     std::thread old_view_cleanup_thread;
 
+    /**
+     * A user-configurable option that disables the checks for partitioning events.
+     * It defaults to false, because disabling them is unsafe, but some users might
+     * want to do this for testing purposes.
+     */
+    const bool disable_partitioning_safety;
+
     //Handles for all the predicates the GMS registered with the current view's SST.
     pred_handle suspected_changed_handle;
     pred_handle start_join_handle;
@@ -158,8 +165,6 @@ private:
     /** Indicates the order that the subgroups should be provisioned;
      * set by Group to be the same order as its template parameters. */
     std::vector<std::type_index> subgroup_type_order;
-    //Parameters stored here, in case we need them again after construction
-    DerechoParams derecho_params;
 
     /** The same set of TCP sockets used by Group and RPCManager. */
     std::shared_ptr<tcp::tcp_connections> tcp_sockets;
@@ -199,6 +204,12 @@ private:
      * Otherwise this will be a null pointer. */
     std::unique_ptr<RestartState> restart_state;
 
+    /**
+     * True if this node is the current leader and is fully active (i.e. has
+     * finished "waking up"), false otherwise.
+     */
+    bool active_leader;
+
     /** The persistence request func is from persistence manager*/
     persistence_manager_callbacks_t persistence_manager_callbacks;
 
@@ -211,40 +222,88 @@ private:
      */
     std::vector<std::vector<int64_t>> prior_view_shard_leaders;
 
-    /** Sends a joining node the new view that has been constructed to include it.*/
-    void send_view(const View& new_view, tcp::socket& client_socket);
+    /**
+     * On a graceful exit, nodes will be agree to leave at some point, where
+     * the view manager should stop throw exception on "failure". Set 
+     * 'bSilence' to keep the view manager calm on detecting intended node
+     * "failure."
+     */
+    std::atomic<bool> bSilent = false;
 
     bool has_pending_join() { return pending_join_sockets.locked().access.size() > 0; }
+
+    /* ---------------------------- View-management triggers ---------------------------- */
+    /**
+     * Called when there is a new failure suspicion. Updates the suspected[]
+     * array and, for the leader, proposes new views to exclude failed members.
+     */
+    void new_suspicion(DerechoSST& gmsSST);
+    /** Runs only on the group leader; proposes new views to include new members. */
+    void leader_start_join(DerechoSST& gmsSST);
+    /** Runs on non-leaders to redirect confused new members to the current leader. */
+    void redirect_join_attempt(DerechoSST& gmsSST);
+    /**
+     * Runs once on a node that becomes a leader due to a failure. Searches for
+     * and re-proposes changes proposed by prior leaders, as well as suspicions
+     * noticed by this node before it became the leader.
+     */
+    void new_leader_takeover(DerechoSST& gmsSST);
+    /**
+     * Runs only on the group leader and updates num_committed when all non-failed
+     * members have acked a proposed view change.
+     */
+    void leader_commit_change(DerechoSST& gmsSST);
+    /**
+     * Updates num_acked to acknowledge a proposed change when the leader increments
+     * num_changes. Mostly intended for non-leaders, but also runs on the leader.
+     */
+    void acknowledge_proposed_change(DerechoSST& gmsSST);
+    /**
+     * Runs when at least one membership change has been committed by the leader, and
+     * wedges the current view in preparation for a new view. Ends by awaiting the
+     * "meta-wedged" state and registers terminate_epoch() to trigger when meta-wedged
+     * is true.
+     */
+    void start_meta_wedge(DerechoSST& gmsSST);
+    /**
+     * Runs when all live nodes have reported they have wedged the current view
+     * (meta-wedged), and starts ragged edge cleanup to finalize the terminated epoch.
+     * Determines if the next view will be adequate, and only proceeds to start a
+     * view change if it will be.
+     */
+    void terminate_epoch(DerechoSST& gmsSST);
+    /**
+     * Runs when the leader nodes of each subgroup have finished ragged edge
+     * cleanup. Echoes the global_min they have posted in the SST to
+     * acknowledge it.
+     * @param follower_subgroups_and_shards A list of subgroups this node is a
+     * non-leader in, and the corresponding shard number for this node
+     */
+    void echo_ragged_trim(std::shared_ptr<std::map<subgroup_id_t, uint32_t>> follower_subgroups_and_shards,
+                          DerechoSST& gmsSST);
+    /**
+     * Delivers messages that were marked deliverable by the ragged trim and
+     * proceeds to finish_view_change() when this is done. Runs after every
+     * non-leader node has echoed the subgroup leaders' ragged trims.
+     */
+    void deliver_ragged_trim(DerechoSST& gmsSST);
+    /**
+     * Finishes installing the new view, assuming it is adequately provisioned.
+     * Sends the new view and necessary Replicated Object state to new members,
+     * sets up the new SST and MulticastGroup instances, and calls the new-view
+     * upcalls.
+     */
+    void finish_view_change(DerechoSST& gmsSST);
+
+    /* ---------------------------------------------------------------------------------- */
+    /* ------------------- Helper methods for view-management triggers ------------------ */
 
     /**
      * Assuming this node is the leader, handles a join request from a client.
      * @return True if the join succeeded, false if it failed because the
      *         client's ID was already in use.
      */
-    bool receive_join(tcp::socket& client_socket);
-
-    /**
-     * Helper for joining an existing group; receives the View and parameters from the leader.
-     */
-    void receive_initial_view(node_id_t my_id, tcp::socket& leader_connection);
-
-    /**
-     * Constructor helper that initializes TCP connections (for state transfer)
-     * to the members of initial_view in ascending rank order. Assumes that no TCP
-     * connections have been set up yet.
-     * @param initial_view The View to use for membership
-     */
-    void setup_initial_tcp_connections(const View& initial_view, node_id_t my_id);
-
-    /**
-     * Another setup helper for joining nodes; re-initializes the TCP connections
-     * list to reflect the current list of members in initial_view, assuming that the
-     * first view was aborted and a new one has been sent.
-     * @param initial_view The View whose membership the TCP connections should be
-     * updated to reflect
-     */
-    void reinit_tcp_connections(const View& initial_view, node_id_t my_id);
-
+    bool receive_join(DerechoSST& gmsSST, tcp::socket& client_socket);
     /**
      * Updates the TCP connections pool to reflect the joined and departed
      * members in a new view. Removes connections to departed members, and
@@ -252,35 +311,6 @@ private:
      * @param new_view The new view that is about to be installed.
      */
     void update_tcp_connections(const View& new_view);
-
-    // View-management triggers
-    /** Called when there is a new failure suspicion. Updates the suspected[]
-     * array and, for the leader, proposes new views to exclude failed members. */
-    void new_suspicion(DerechoSST& gmsSST);
-    /** Runs only on the group leader; proposes new views to include new members. */
-    void leader_start_join(DerechoSST& gmsSST);
-    /** Runs on non-leaders to redirect confused new members to the current leader. */
-    void redirect_join_attempt(DerechoSST& gmsSST);
-    /** Runs only on the group leader and updates num_committed when all non-failed
-     * members have acked a proposed view change. */
-    void leader_commit_change(DerechoSST& gmsSST);
-    /** Updates num_acked to acknowledge a proposed change when the leader increments
-     * num_changes. Mostly intended for non-leaders, but also runs on the leader. */
-    void acknowledge_proposed_change(DerechoSST& gmsSST);
-    /** Runs when at least one membership change has been committed by the leader, and
-     * wedges the current view in preparation for a new view. Ends by awaiting the
-     * "meta-wedged" state and registers start_view_change() to trigger when meta-wedged
-     * is true. */
-    void start_meta_wedge(DerechoSST& gmsSST);
-    /** Runs when all live nodes have reported they have wedged the current view
-     * (meta-wedged), and does ragged edge cleanup to finalize the terminated epoch.
-     * Determines if the next view will be adequate, and only proceeds to start a view change if it will be. */
-    void terminate_epoch(DerechoSST& gmsSST);
-    /** Finishes installing the new view, assuming it is adequately provisioned.
-     * Sends the new view and necessary Replicated Object state to new members,
-     * sets up the new SST and MulticastGroup instances, and calls the new-view upcalls. */
-    void finish_view_change(std::shared_ptr<std::map<subgroup_id_t, uint32_t>> follower_subgroups_and_shards,
-                            DerechoSST& gmsSST);
 
     /** Helper method for completing view changes; determines whether this node
      * needs to send Replicated Object state to each node that just joined, and then
@@ -290,6 +320,25 @@ private:
     /** Sends a single subgroup's replicated object to a new member after a view change. */
     void send_subgroup_object(subgroup_id_t subgroup_id, node_id_t new_node_id);
 
+    /** Sends a joining node the new view that has been constructed to include it.*/
+    void send_view(const View& new_view, tcp::socket& client_socket);
+
+    /**
+     * Reads the global_min values for the specified subgroup (and the shard
+     * that this node belongs to) from the SST, creates a ragged trim vector
+     * with these values, and persists the ragged trim to disk
+     * @param shard_leader_rank The rank of the leader node in this node's shard
+     * of the specified subgroup
+     * @param subgroup_num The subgroup ID to compute the ragged trim for
+     * @param num_received_offset The offset into the SST's num_received field
+     * that corresponds to the specified subgroup's entries in it
+     * @param num_shard_senders The number of nodes in that shard that are active
+     * senders in the current epoch
+     */
+    void log_ragged_trim(const int shard_leader_rank,
+                         const subgroup_id_t subgroup_num,
+                         const uint32_t num_received_offset,
+                         const uint num_shard_senders);
     /**
      * Reads the global_min for the specified subgroup from the SST (assuming it
      * has been computed already) and tells the current View's MulticastGroup to
@@ -297,7 +346,7 @@ private:
      * @param shard_leader_rank The rank of the leader node in this node's shard
      * of the specified subgroup
      * @param subgroup_num The subgroup ID to deliver messages in
-     * @param nReceived_offset The offset into the SST's num_received field
+     * @param num_received_offset The offset into the SST's num_received field
      * that corresponds to the specified subgroup's entries in it
      * @param shard_members The IDs of the members of this node's shard in the
      * specified subgroup
@@ -305,7 +354,7 @@ private:
      * senders in the current epoch
      */
     void deliver_in_order(const int shard_leader_rank,
-                          const subgroup_id_t subgroup_num, const uint32_t nReceived_offset,
+                          const subgroup_id_t subgroup_num, const uint32_t num_received_offset,
                           const std::vector<node_id_t>& shard_members, uint num_shard_senders);
     /**
      * Implements the Ragged Edge Cleanup algorithm for a subgroup/shard leader,
@@ -333,22 +382,33 @@ private:
      * of the specified subgroup
      * @param num_received_offset The offset into the SST's num_received field
      * that corresponds to the specified subgroup's entries in it
-     * @param shard_members The IDs of the members of this node's shard in the
-     * specified subgroup
      * @param num_shard_senders The number of nodes in that shard that are active
      * senders in the current epoch
      */
     void follower_ragged_edge_cleanup(const subgroup_id_t subgroup_num,
                                       uint shard_leader_rank,
                                       const uint32_t num_received_offset,
-                                      const std::vector<node_id_t>& shard_members,
                                       uint num_shard_senders);
+
 
     /* -- Static helper methods that implement chunks of view-management functionality -- */
     static bool suspected_not_equal(const DerechoSST& gmsSST, const std::vector<bool>& old);
     static void copy_suspected(const DerechoSST& gmsSST, std::vector<bool>& old);
     static bool changes_contains(const DerechoSST& gmsSST, const node_id_t q);
     static int min_acked(const DerechoSST& gmsSST, const std::vector<char>& failed);
+    static bool previous_leaders_suspected(const DerechoSST& gmsSST, const View& curr_view);
+
+    /**
+     * Searches backwards from this node's row in the SST to lower-ranked rows,
+     * looking for proposed changes not in this node's changes list, assuming
+     * this node is the current leader and the lower-ranked rows are failed
+     * prior leaders. If a lower-ranked row has more changes, or different
+     * changes, copies that node's changes array to the local row.
+     * @param gmsSST
+     * @return True if there was a prior leader with changes to copy, false if
+     * no prior proposals were found.
+     */
+    static bool copy_prior_leader_proposals(DerechoSST& gmsSST);
 
     /**
      * Constructs the next view from the current view and the set of committed
@@ -363,7 +423,8 @@ private:
 
     /* ---------------------------------------------------------------------------------- */
 
-    //Setup/constructor helpers
+    /* ------------------------ Setup/constructor helpers ------------------------------- */
+
     /** Constructor helper method to encapsulate spawning the background threads. */
     void create_threads();
     /** Constructor helper method to encapsulate creating all the predicates. */
@@ -387,22 +448,48 @@ private:
 
     /** Performs one-time global initialization of RDMC and SST, using the current view's membership. */
     void initialize_rdmc_sst();
+    /**
+     * Helper for joining an existing group; receives the View and parameters from the leader.
+     */
+    void receive_initial_view(node_id_t my_id, tcp::socket& leader_connection);
 
+    /**
+     * Constructor helper that initializes TCP connections (for state transfer)
+     * to the members of initial_view in ascending rank order. Assumes that no TCP
+     * connections have been set up yet.
+     * @param initial_view The View to use for membership
+     */
+    void setup_initial_tcp_connections(const View& initial_view, node_id_t my_id);
+
+    /**
+     * Another setup helper for joining nodes; re-initializes the TCP connections
+     * list to reflect the current list of members in initial_view, assuming that the
+     * first view was aborted and a new one has been sent.
+     * @param initial_view The View whose membership the TCP connections should be
+     * updated to reflect
+     */
+    void reinit_tcp_connections(const View& initial_view, node_id_t my_id);
     /**
      * Creates the SST and MulticastGroup for the first time, using the current view's member list.
      * @param callbacks The custom callbacks to supply to the MulticastGroup
-     * @param derecho_params The initial DerechoParams to supply to the MulticastGroup
      * @param subgroup_settings The subgroup settings map to supply to the MulticastGroup
      * @param num_received_size The size of the num_received field in the SST (derived from subgroup_settings)
      */
     void construct_multicast_group(CallbackSet callbacks,
                                    const std::map<subgroup_id_t, SubgroupSettings>& subgroup_settings,
-                                   const uint32_t num_received_size);
+                                   const uint32_t num_received_size,
+                                   const uint32_t slot_size);
 
-    /** Sets up the SST and MulticastGroup for a new view, based on the settings in the current view,
-     * and copies over the SST data from the current view. */
+    /**
+     * Sets up the SST and MulticastGroup for a new view, based on the settings in the current view,
+     * and copies over the SST data from the current view.
+     * @param new_subgroup_settings The subgroup settings map to supply to the MulticastGroup;
+     * this needs to change to account for the new subgroup/shard membership in the new view
+     * @param new_num_received_size The size of the num_recieved field in the new SST
+     */
     void transition_multicast_group(const std::map<subgroup_id_t, SubgroupSettings>& new_subgroup_settings,
-                                    const uint32_t new_num_received_size);
+                                    const uint32_t new_num_received_size,
+                                    const uint32_t new_slot_size);
     /**
      * Initializes curr_view with subgroup information based on the membership
      * functions in subgroup_info. If curr_view would be inadequate based on
@@ -427,10 +514,10 @@ private:
      * my_subgroups corrected
      * @param subgroup_settings A mutable reference to the subgroup settings map,
      * which will be filled in by this function
-     * @return num_received_size for the SST based on the current View's subgroup membership
+     * @return num_received_size and slot_size for the SST based on the current View's subgroup membership
      */
-    static uint32_t derive_subgroup_settings(View& curr_view,
-                                             std::map<subgroup_id_t, SubgroupSettings>& subgroup_settings);
+    std::pair<uint32_t, uint32_t> derive_subgroup_settings(View& curr_view,
+                                                           std::map<subgroup_id_t, SubgroupSettings>& subgroup_settings);
 
     /**
      * Recomputes num_received_size (the length of the num_received column in
@@ -442,7 +529,9 @@ private:
      */
     static uint32_t compute_num_received_size(const View& view);
 
-    /** Constructs a map from node ID -> IP address from the parallel vectors in the given View. */
+    /**
+     * Constructs a map from node ID -> IP address from the parallel vectors in the given View.
+     */
     template <PORT_TYPE port_index>
     static std::map<node_id_t, std::pair<ip_addr_t, uint16_t>>
     make_member_ips_and_ports_map(const View& view) {
@@ -450,7 +539,9 @@ private:
         size_t num_members = view.members.size();
         for(uint i = 0; i < num_members; ++i) {
             if(!view.failed[i]) {
-                member_ips_and_ports_map[view.members[i]] = std::pair<ip_addr_t, uint16_t>{std::get<0>(view.member_ips_and_ports[i]), std::get<port_index>(view.member_ips_and_ports[i])};
+                member_ips_and_ports_map[view.members[i]] = std::pair<ip_addr_t, uint16_t>{
+                        std::get<0>(view.member_ips_and_ports[i]),
+                        std::get<port_index>(view.member_ips_and_ports[i])};
             }
         }
         return member_ips_and_ports_map;
@@ -490,8 +581,6 @@ public:
      * @param my_ip The IP address of the node executing this code
      * @param subgroup_info The set of functions defining subgroup membership
      * for this group.
-     * @param derecho_params The assorted configuration parameters for this
-     * Derecho group instance, such as message size and logfile name
      * @param group_tcp_sockets The pool of TCP connections to each group member
      * that is shared with Group.
      * @param object_reference_map A mutable reference to the list of
@@ -657,10 +746,6 @@ public:
      */
     SharedLockedReference<const View> get_current_view_const();
 
-    /** Gets a read-only reference to the DerechoParams settings,
-     * in case other components need to see them after construction time. */
-    const DerechoParams& get_derecho_params() const { return derecho_params; }
-
     /** Adds another function to the set of "view upcalls," which are called
      * when the view changes to notify another component of the new view. */
     void add_view_upcall(const view_upcall_t& upcall);
@@ -680,7 +765,20 @@ public:
         initialize_subgroup_objects = std::move(upcall);
     }
 
+    /**
+     * stop complaining about node failures.
+     */
+    void silence();
+
     void debug_print_status() const;
+
+    // UGLY - IMPROVE LATER
+    std::map<subgroup_id_t, uint64_t> max_payload_sizes;
+    std::map<subgroup_id_t, uint64_t> get_max_payload_sizes();
+    // max of max_payload_sizes
+    uint64_t view_max_payload_size = 0;
+    unsigned int view_max_window_size = 0;
+    unsigned int view_max_sender_timeout = 0;
 };
 
 } /* namespace derecho */

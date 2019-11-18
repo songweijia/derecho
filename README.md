@@ -1,6 +1,7 @@
 Full source documentation can be found at https://derecho-project.github.io/.
 
-# Derecho
+
+# Derecho [![Build Status](https://travis-ci.com/Derecho-Project/derecho.svg?branch=master)](https://travis-ci.com/Derecho-Project/derecho)
 This is the main repository for the Derecho project. It unifies the RDMC, SST, and Derecho modules under a single, easy-to-use repository. 
 
 ## Intended use cases and assumptions.
@@ -45,15 +46,15 @@ Once cloning is complete, to build the code, `cd` into the `derecho` directory a
 * `cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=<path-to-install-dir> ..`
 * ``make -j `lscpu | grep "^CPU(" | awk '{print $2}'` ``
 
-This will place the binaries and libraries in the sub-dierectories of `Release`.
+This will place the binaries and libraries in the sub-directories of `Release`.
 The other build type is Debug. If you need to build the Debug version, replace Release by Debug in the above instructions. We explicitly disable in-source build, so running `cmake .` in `derecho` will not work.
 
 Once the project is built, install it by run:
 * `make install`
 
-By default, derecho will be install into `/usr/local/`. Please make sure you have `sudo` priviledge to write to system directories.
+By default, derecho will be install into `/usr/local/`. Please make sure you have `sudo` privileges to write to system directories.
 
-Successful installtion will set up the followings in `$DESTDIR`:
+Successful installation will set up the followings in `$DESTDIR`:
 * `include/derecho` - the header files
 * `lib/libderecho.so` - the main shared library
 * `lib/libdpods.so` - the derecho Old-Plain-Data storage library
@@ -78,10 +79,17 @@ Applications need to tell the Derecho library which node is the initial leader w
 
 The other important parameters are the message sizes. Since Derecho pre-allocates buffers for RDMA communication, each application should decide on an optimal buffer size based on the amount of data it expects to send at once. If the buffer size is much larger than the messages an application actually sends, Derecho will pin a lot of memory and leave it underutilized. If the buffer size is smaller than the application's actual message size, it will have to split messages into segments before sending them, causing unnecessary overhead.
 
-There are three options to control the size of messages: **max_payload_size**, **max_smc_payload_size**, and **block_size**.
-No message bigger than **max_payload_size** will be sent by Derecho. Messages equal to or smaller than **max_smc_payload_size** will be sent through SST multicast (SMC), which is more suitable than RDMC for small messages. **block_size** defines the size of unit sent in RDMC (messages bigger than **block_size** will be split internally and sent in a pipeline).
+Three message-size options control the memory footprint and performance of Derecho.  In all cases, larger values will increase the memory (DRAM) footprint of the application, and it is fairly easy to end up with a huge memory size if you just pick giant values.  The defaults keep the memory size smaller, but can reduce performance if an application is sending high rates of larger messages.
 
-Please refer to the comments in [the default configuration file](https://github.com/Derecho-Project/derecho/blob/master/conf/derecho-default.cfg) for more explanations on **window_size**, **timeout_ms**, and **rdmc_send_algorithm**.
+The options are named **max_payload_size**, **max_smc_payload_size**, and **block_size**. 
+
+No message bigger than **max_payload_size** will be sent by Derecho. 
+
+To understand the other two options, it helps to remember that internally, Derecho makes use of two sub-protocols when it transmits your data.  One sub-protocol is optimized for small messages, and is called SMC.  Messages equal to or smaller than **max_smc_payload_size** will be sent using SMC.  Normally **max_smc_payload_size** is set to a small value, like 1K, but we have tested with values up to 10K.  This limit should not be made much larger – performance will suffer and memory would bloat.
+
+Larger messages are sent via RDMC, our “big object” protocol.  These will be automatically broken into chunks.  Each chunk will be of size  **block_size**.  The **block_size** value we tend to favor in our tests is 1MB, but we have run experiments with values as large as 100MB.   If you plan to send huge objects, like 100MB or even multi-gigabyte images, consider a larger block size – it pays off at that scale.  If you expect that huge objects would be rare, use a value like 1MB.
+
+More information about Derecho parameter setting can be found in the comments in [the default configuration file](https://github.com/Derecho-Project/derecho/blob/master/conf/derecho-default.cfg).  You may want to read about **window_size**, **timeout_ms**, and **rdmc_send_algorithm**.
 
 #### Configuring RDMA Devices
 The most important configuration entries in this section are **provider** and **domain**. The **provider** option specifies the type of RDMA device (i.e. a class of hardware) and the **domain** option specifies the device (i.e. a specific NIC or network interface). This [Libfabric document](https://www.slideshare.net/seanhefty/ofi-overview) explains the details of those concepts.
@@ -349,7 +357,7 @@ public:
 	
 For simplicity, the versioned type is int in this example. You set it up in the same way as a non-versioned member of a replicated object, except that you need to pass the PersistentRegistry from the constructor of the replicated object to the constructor of the `Persistent<T>`. Derecho uses PersistentRegistry to keep track of all the Persistent<T> objects in a single Replicated Object so that it can create versions on updates. The Persistent<T> constructor registers itself in the registry.
 
-By default, the Persistent<T> stores its log in the filesystem (in a folder called .plog in the current directory). Application can specify memory as the storage location by setting the second template parameter: `Persistent<T,ST_MEM>` (or `Volatile<T>` as syntactic sugar). We are working on more store storage types including NVM.
+By default, the Persistent<T> stores its log in the file-system (in a folder called .plog in the current directory). Application can specify memory as the storage location by setting the second template parameter: `Persistent<T,ST_MEM>` (or `Volatile<T>` as syntactic sugar). We are working on more store storage types including NVM.
 
 Once the version vector is set up with Derecho, the application can query the value with the get() APIs in Persistent<T>. In [persistent_temporal_query_test.cpp](https://github.com/Derecho-Project/derecho/blob/master/derecho/experiments/persistent_temporal_query_test.cpp), a temporal query example is illustrated.
 

@@ -2,8 +2,8 @@
 
 #include <derecho/core/detail/container_template_functions.hpp>
 #include <derecho/core/detail/restart_state.hpp>
-#include <derecho/utils/logger.hpp>
 #include <derecho/core/detail/version_code.hpp>
+#include <derecho/utils/logger.hpp>
 //This code needs access to ViewManager's static methods
 #include <derecho/core/detail/view_manager.hpp>
 
@@ -72,12 +72,11 @@ persistent::version_t RestartState::ragged_trim_to_latest_version(const int32_t 
 }
 
 RestartLeaderState::RestartLeaderState(std::unique_ptr<View> _curr_view, RestartState& restart_state,
-                                       const SubgroupInfo& subgroup_info, const DerechoParams& derecho_params,
+                                       const SubgroupInfo& subgroup_info,
                                        const node_id_t my_id)
         : curr_view(std::move(_curr_view)),
           restart_state(restart_state),
           subgroup_info(subgroup_info),
-          derecho_params(derecho_params),
           last_known_view_members(curr_view->members.begin(), curr_view->members.end()),
           longest_log_versions(curr_view->subgroup_shard_views.size()),
           nodes_with_longest_log(curr_view->subgroup_shard_views.size()),
@@ -260,10 +259,8 @@ int64_t RestartLeaderState::send_restart_view() {
     for(auto waiting_sockets_iter = waiting_join_sockets.begin();
         waiting_sockets_iter != waiting_join_sockets.end();) {
         std::size_t view_buffer_size = mutils::bytes_size(*restart_view);
-        std::size_t params_buffer_size = mutils::bytes_size(derecho_params);
         std::size_t leaders_buffer_size = mutils::bytes_size(nodes_with_longest_log);
         char view_buffer[view_buffer_size];
-        char params_buffer[params_buffer_size];
         char leaders_buffer[leaders_buffer_size];
         bool send_success;
         //Within this try block, any send that returns failure throws the ID of the node that failed
@@ -275,15 +272,6 @@ int64_t RestartLeaderState::send_restart_view() {
             }
             mutils::to_bytes(*restart_view, view_buffer);
             send_success = waiting_sockets_iter->second.write(view_buffer, view_buffer_size);
-            if(!send_success) {
-                throw waiting_sockets_iter->first;
-            }
-            send_success = waiting_sockets_iter->second.write(params_buffer_size);
-            if(!send_success) {
-                throw waiting_sockets_iter->first;
-            }
-            mutils::to_bytes(derecho_params, params_buffer);
-            send_success = waiting_sockets_iter->second.write(params_buffer, params_buffer_size);
             if(!send_success) {
                 throw waiting_sockets_iter->first;
             }
@@ -368,11 +356,23 @@ void RestartLeaderState::send_abort() {
 int64_t RestartLeaderState::send_prepare() {
     for(auto waiting_sockets_iter = waiting_join_sockets.begin();
         waiting_sockets_iter != waiting_join_sockets.end();) {
-        bool send_success;
+        bool socket_success;
         try {
             dbg_default_debug("Sending view prepare message to node {}", waiting_sockets_iter->first);
-            send_success = waiting_sockets_iter->second.write(CommitMessage::PREPARE);
-            if(!send_success) {
+            socket_success = waiting_sockets_iter->second.write(CommitMessage::PREPARE);
+            if(!socket_success) {
+                throw waiting_sockets_iter->first;
+            }
+            //Wait for an acknowledgment, to make sure the node has finished state transfer
+            CommitMessage response;
+            socket_success = waiting_sockets_iter->second.read(response);
+            if(!socket_success) {
+                throw waiting_sockets_iter->first;
+            }
+            if(response == CommitMessage::ACK) {
+                dbg_default_debug("Node {} acknowledged Prepare", waiting_sockets_iter->first);
+            } else {
+                dbg_default_warn("Node {} responded to Prepare with something other than Ack!", waiting_sockets_iter->first);
                 throw waiting_sockets_iter->first;
             }
         } catch(node_id_t failed_node) {
@@ -494,7 +494,7 @@ std::unique_ptr<View> RestartLeaderState::make_next_view(const std::unique_ptr<V
                                             joiner_ids, departed, my_new_rank, next_unassigned_rank,
                                             curr_view->subgroup_type_order);
     next_view->i_know_i_am_leader = curr_view->i_know_i_am_leader;
-    return std::move(next_view);
+    return next_view;
 }
 
 bool RestartLeaderState::contains_at_least_one_member_per_subgroup(std::set<node_id_t> rejoined_node_ids, const View& last_view) {

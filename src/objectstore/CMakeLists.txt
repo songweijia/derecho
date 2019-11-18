@@ -8,9 +8,15 @@ set(dpods_build_VERSION "0.9.1")
 
 # compiler flags
 set(CMAKE_CXX_FLAGS "-fPIC -std=c++1z -Wall")
-set(CMAKE_CXX_FLAGS_DEBUG "-O0 -ggdb -gdwarf-3 -D_DEBUG -pg")
-set(CMAKE_CXX_FLAGS_RELEASE "-O3")
-set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O3 -ggdb -gdwarf-3 -D_DEBUG -D_PERFORMANCE_DEBUG")
+set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -O0 -ggdb -gdwarf-3 -D_DEBUG")
+set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}")
+set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO} -ggdb -gdwarf-3 -D_DEBUG -D_PERFORMANCE_DEBUG")
+
+
+if ( NOT DEFINED CMAKE_INSTALL_LIBDIR )
+    set( CMAKE_INSTALL_LIBDIR lib )
+endif ( )
+
 
 # objectstore library
 add_library(dpods SHARED ObjectStore.cpp Object.cpp)
@@ -45,7 +51,7 @@ add_dependencies(dpods_perf dpods)
 
 # make install
 install(TARGETS dpods EXPORT dpods
-        LIBRARY DESTINATION lib)
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
 install(DIRECTORY
         ${CMAKE_SOURCE_DIR}/include/derecho/objectstore
         DESTINATION include/derecho)

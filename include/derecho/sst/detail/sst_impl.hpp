@@ -141,7 +141,7 @@ void SST<DerivedSST>::detect() {
 }
 
 template <typename DerivedSST>
-void SST<DerivedSST>::put(const std::vector<uint32_t> receiver_ranks, long long int offset, long long int size) {
+void SST<DerivedSST>::put(const std::vector<uint32_t> receiver_ranks, size_t offset, size_t size) {
     assert(offset + size <= rowLen);
     for(auto index : receiver_ranks) {
         // don't write to yourself or a frozen row
@@ -155,7 +155,7 @@ void SST<DerivedSST>::put(const std::vector<uint32_t> receiver_ranks, long long 
 }
 
 template <typename DerivedSST>
-void SST<DerivedSST>::put_with_completion(const std::vector<uint32_t> receiver_ranks, long long int offset, long long int size) {
+void SST<DerivedSST>::put_with_completion(const std::vector<uint32_t> receiver_ranks, size_t offset, size_t size) {
     assert(offset + size <= rowLen);
     unsigned int num_writes_posted = 0;
     std::vector<bool> posted_write_to(num_members, false);
@@ -183,7 +183,7 @@ void SST<DerivedSST>::put_with_completion(const std::vector<uint32_t> receiver_r
         num_writes_posted++;
     }
 
-    // track which nodes haven't failed yet
+    // track which nodes respond successfully
     std::vector<bool> polled_successfully_from(num_members, false);
 
     std::vector<uint32_t> failed_node_indexes;
@@ -192,11 +192,11 @@ void SST<DerivedSST>::put_with_completion(const std::vector<uint32_t> receiver_r
     unsigned long cur_time_msec;
     struct timeval cur_time;
 
-    // wait for completion for a while before giving up of doing it ..
+    // wait for completions for a while but eventually give up on it
     gettimeofday(&cur_time, NULL);
     start_time_msec = (cur_time.tv_sec * 1000) + (cur_time.tv_usec / 1000);
 
-    // poll for surviving number of rows
+    // poll for a single completion for each write request submitted
     for(unsigned int index = 0; index < num_writes_posted; ++index) {
         std::optional<std::pair<int32_t, int32_t>> ce;
 
@@ -214,14 +214,14 @@ void SST<DerivedSST>::put_with_completion(const std::vector<uint32_t> receiver_r
         }
         // if waiting for a completion entry timed out
         if(!ce) {
-            // find some node that hasn't been polled yet and report it
+            // mark all nodes that have not yet responded as failed
             for(unsigned int index2 = 0; index2 < num_members; ++index2) {
                 if(!posted_write_to[index2] || polled_successfully_from[index2]) {
                     continue;
                 }
                 failed_node_indexes.push_back(index2);
             }
-            continue;
+            break;
         }
 
         auto ce_v = ce.value();
@@ -253,7 +253,9 @@ void SST<DerivedSST>::freeze(int row_index) {
         row_is_frozen[row_index] = true;
     }
     num_frozen++;
-    res_vec[row_index].reset();
+    //BUG: deleting from res_vec here creates a race with put(), which blindly
+    //dereferences res_vec[index] after checking fow_is_frozen
+//    res_vec[row_index].reset();
     if(failure_upcall) {
         failure_upcall(members[row_index]);
     }

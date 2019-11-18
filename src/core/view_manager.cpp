@@ -36,13 +36,14 @@ ViewManager::ViewManager(
         std::vector<view_upcall_t> _view_upcalls)
         : server_socket(getConfUInt16(CONF_DERECHO_GMS_PORT)),
           thread_shutdown(false),
+          disable_partitioning_safety(getConfBoolean(CONF_DERECHO_DISABLE_PARTITIONING_SAFETY)),
           view_upcalls(_view_upcalls),
           subgroup_info(subgroup_info),
           subgroup_type_order(subgroup_type_order),
-          derecho_params(),
           tcp_sockets(group_tcp_sockets),
           subgroup_objects(object_reference_map),
           any_persistent_objects(any_persistent_objects),
+          active_leader(true),
           persistence_manager_callbacks(_persistence_manager_callbacks) {
     rls_default_info("Derecho library running version {}.{}.{} + {} commits",
                      derecho::MAJOR_VERSION, derecho::MINOR_VERSION, derecho::PATCH_VERSION,
@@ -62,7 +63,7 @@ ViewManager::ViewManager(
         restart_state->load_ragged_trim(*curr_view);
         restart_leader_state_machine = std::make_unique<RestartLeaderState>(
                 std::move(curr_view), *restart_state,
-                subgroup_info, derecho_params, my_id);
+                subgroup_info, my_id);
         await_rejoining_nodes(my_id);
         setup_initial_tcp_connections(restart_leader_state_machine->get_restart_view(), my_id);
     } else {
@@ -95,13 +96,14 @@ ViewManager::ViewManager(
         std::vector<view_upcall_t> _view_upcalls)
         : server_socket(getConfUInt16(CONF_DERECHO_GMS_PORT)),
           thread_shutdown(false),
+          disable_partitioning_safety(getConfBoolean(CONF_DERECHO_DISABLE_PARTITIONING_SAFETY)),
           view_upcalls(_view_upcalls),
           subgroup_info(subgroup_info),
           subgroup_type_order(subgroup_type_order),
-          derecho_params(),
           tcp_sockets(group_tcp_sockets),
           subgroup_objects(object_reference_map),
           any_persistent_objects(any_persistent_objects),
+          active_leader(false),
           persistence_manager_callbacks(_persistence_manager_callbacks) {
     rls_default_info("Derecho library running version {}.{}.{} + {} commits",
                      derecho::MAJOR_VERSION, derecho::MINOR_VERSION, derecho::PATCH_VERSION,
@@ -146,7 +148,7 @@ void ViewManager::receive_initial_view(node_id_t my_id, tcp::socket& leader_conn
         if(leader_response.code == JoinResponseCode::ID_IN_USE) {
             dbg_default_error("Error! Leader refused connection because ID {} is already in use!", my_id);
             dbg_default_flush();
-            throw derecho_exception("Leader rejected join, ID already in use");
+            throw derecho_exception("Leader rejected join, ID already in use.");
         }
         if(leader_response.code == JoinResponseCode::LEADER_REDIRECT) {
             std::size_t ip_addr_size;
@@ -215,15 +217,6 @@ void ViewManager::receive_view_and_leaders(const node_id_t my_id, tcp::socket& l
         throw derecho_exception("Leader crashed before it could send the initial View! Try joining again at the new leader.");
     }
     curr_view = mutils::from_bytes<View>(nullptr, buffer);
-    //Next, the leader sends DerechoParams
-    std::size_t size_of_derecho_params;
-    success = leader_connection.read(size_of_derecho_params);
-    char buffer2[size_of_derecho_params];
-    success = leader_connection.read(buffer2, size_of_derecho_params);
-    if(!success) {
-        throw derecho_exception("Leader crashed before it could send the initial View! Try joining again at the new leader.");
-    }
-    derecho_params = *mutils::from_bytes<DerechoParams>(nullptr, buffer2);
     if(in_total_restart) {
         //In total restart mode, the leader will also send the RaggedTrims it has collected
         dbg_default_debug("In restart mode, receiving ragged trim from leader");
@@ -260,8 +253,13 @@ bool ViewManager::check_view_committed(tcp::socket& leader_connection) {
     }
     if(commit_message == CommitMessage::PREPARE) {
         dbg_default_debug("Leader sent PREPARE");
-        //On success, replace commit_message with the second message, which is either Commit or Abort
-        bool success = leader_connection.read(commit_message);
+        bool success = leader_connection.write(CommitMessage::ACK);
+        if(!success) {
+            throw derecho_exception("Leader crashed before it could send the initial View! Try joining again at the new leader.");
+        }
+        //After a successful Prepare, replace commit_message with the second message,
+        //which is either Commit or Abort
+        success = leader_connection.read(commit_message);
         if(!success) {
             throw derecho_exception("Leader crashed before it could send the initial View! Try joining again at the new leader.");
         }
@@ -298,7 +296,9 @@ void ViewManager::truncate_logs() {
 void ViewManager::initialize_multicast_groups(CallbackSet callbacks) {
     initialize_rdmc_sst();
     std::map<subgroup_id_t, SubgroupSettings> subgroup_settings_map;
-    uint32_t num_received_size = derive_subgroup_settings(*curr_view, subgroup_settings_map);
+    auto sizes = derive_subgroup_settings(*curr_view, subgroup_settings_map);
+    uint32_t num_received_size = sizes.first;
+    uint32_t slot_size = sizes.second;
     dbg_default_trace("Initial view is: {}", curr_view->debug_string());
     if(any_persistent_objects) {
         //Persist the initial View to disk as soon as possible, which is after my_subgroups has been initialized
@@ -306,7 +306,7 @@ void ViewManager::initialize_multicast_groups(CallbackSet callbacks) {
     }
 
     dbg_default_debug("Initializing SST and RDMC for the first time.");
-    construct_multicast_group(callbacks, subgroup_settings_map, num_received_size);
+    construct_multicast_group(callbacks, subgroup_settings_map, num_received_size, slot_size);
     curr_view->gmsSST->vid[curr_view->my_rank] = curr_view->vid;
 }
 
@@ -316,16 +316,18 @@ void ViewManager::finish_setup() {
         //If we were doing total restart, it has completed successfully
         restart_state.reset();
         in_total_restart = false;
+        //The restart leader now gives up its leader role to the "real" leader
+        active_leader = curr_view->i_am_leader();
     }
     last_suspected = std::vector<bool>(curr_view->members.size());
     curr_view->gmsSST->put();
     curr_view->gmsSST->sync_with_members();
     dbg_default_debug("Done setting up initial SST and RDMC");
 
-    if(curr_view->vid != 0 && curr_view->my_rank != curr_view->rank_of_leader()) {
+    if(curr_view->vid != 0 && curr_view->my_rank != curr_view->find_rank_of_leader()) {
         // If this node is joining an existing group with a non-initial view, copy the leader's num_changes, num_acked, and num_committed
         // Otherwise, you'll immediately think that there's a new proposed view change because gmsSST.num_changes[leader] > num_acked[my_rank]
-        curr_view->gmsSST->init_local_change_proposals(curr_view->rank_of_leader());
+        curr_view->gmsSST->init_local_change_proposals(curr_view->find_rank_of_leader());
         curr_view->gmsSST->put();
         dbg_default_debug("Joining node initialized its SST row from the leader");
     }
@@ -386,19 +388,6 @@ void ViewManager::reinit_tcp_connections(const View& initial_view, node_id_t my_
                                    std::get<PORT_TYPE::RPC>(initial_view.member_ips_and_ports[i])});
             dbg_default_debug("Established a TCP connection to node {}", initial_view.members[i]);
         }
-    }
-}
-
-void ViewManager::update_tcp_connections(const View& new_view) {
-    for(const node_id_t& removed_id : new_view.departed) {
-        dbg_default_debug("Removing TCP connection for failed node {}", removed_id);
-        tcp_sockets->delete_node(removed_id);
-    }
-    for(const node_id_t& joiner_id : new_view.joined) {
-        tcp_sockets->add_node(joiner_id,
-                              {std::get<0>(new_view.member_ips_and_ports[new_view.rank_of(joiner_id)]),
-                               std::get<PORT_TYPE::RPC>(new_view.member_ips_and_ports[new_view.rank_of(joiner_id)])});
-        dbg_default_debug("Established a TCP connection to node {}", joiner_id);
     }
 }
 
@@ -463,7 +452,8 @@ void ViewManager::await_first_view(const node_id_t my_id) {
             //None of these views are ever installed, so we don't use curr_view/next_view like normal
             curr_view = std::make_unique<View>(curr_view->vid,
                                                functional_append(curr_view->members, joiner_id),
-                                               functional_append(curr_view->member_ips_and_ports, {joiner_ip, joiner_gms_port, joiner_rpc_port, joiner_sst_port, joiner_rdmc_port}),
+                                               functional_append(curr_view->member_ips_and_ports,
+                                                                 {joiner_ip, joiner_gms_port, joiner_rpc_port, joiner_sst_port, joiner_rdmc_port}),
                                                std::vector<char>(curr_view->num_members + 1, 0),
                                                functional_append(curr_view->joined, joiner_id),
                                                std::vector<node_id_t>{}, 0, 0,
@@ -476,9 +466,7 @@ void ViewManager::await_first_view(const node_id_t my_id) {
         for(auto waiting_sockets_iter = waiting_join_sockets.begin();
             waiting_sockets_iter != waiting_join_sockets.end();) {
             std::size_t view_buffer_size = mutils::bytes_size(*curr_view);
-            std::size_t params_buffer_size = mutils::bytes_size(derecho_params);
             char view_buffer[view_buffer_size];
-            char params_buffer[params_buffer_size];
             bool send_success;
             //Within this try block, any send that returns failure throws the ID of the node that failed
             try {
@@ -489,16 +477,6 @@ void ViewManager::await_first_view(const node_id_t my_id) {
                 }
                 mutils::to_bytes(*curr_view, view_buffer);
                 send_success = waiting_sockets_iter->second.write(view_buffer, view_buffer_size);
-                if(!send_success) {
-                    throw waiting_sockets_iter->first;
-                }
-                //Then send the DerechoParams
-                send_success = waiting_sockets_iter->second.write(params_buffer_size);
-                if(!send_success) {
-                    throw waiting_sockets_iter->first;
-                }
-                mutils::to_bytes(derecho_params, params_buffer);
-                send_success = waiting_sockets_iter->second.write(params_buffer, params_buffer_size);
                 if(!send_success) {
                     throw waiting_sockets_iter->first;
                 }
@@ -669,31 +647,31 @@ void ViewManager::register_predicates() {
     auto suspected_changed_trig = [this](DerechoSST& sst) { new_suspicion(sst); };
 
     auto start_join_pred = [this](const DerechoSST& sst) {
-        return curr_view->i_am_leader() && has_pending_join();
+        return active_leader && has_pending_join();
     };
     auto start_join_trig = [this](DerechoSST& sst) { leader_start_join(sst); };
 
     auto reject_join_pred = [this](const DerechoSST& sst) {
-        return !curr_view->i_am_leader() && has_pending_join();
+        return !active_leader && has_pending_join();
     };
     auto reject_join = [this](DerechoSST& sst) { redirect_join_attempt(sst); };
 
     auto change_commit_ready = [this](const DerechoSST& gmsSST) {
-        return curr_view->i_am_leader()
-               && min_acked(gmsSST, curr_view->failed) > gmsSST.num_committed[gmsSST.get_local_index()];
+        return active_leader
+               && min_acked(gmsSST, curr_view->failed) > gmsSST.num_committed[curr_view->my_rank];
     };
     auto commit_change = [this](DerechoSST& sst) { leader_commit_change(sst); };
 
     auto leader_proposed_change = [this](const DerechoSST& gmsSST) {
-        return gmsSST.num_changes[curr_view->rank_of_leader()]
-               > gmsSST.num_acked[gmsSST.get_local_index()];
+        return gmsSST.num_changes[curr_view->find_rank_of_leader()]
+               > gmsSST.num_acked[curr_view->my_rank];
     };
     auto ack_proposed_change = [this](DerechoSST& sst) {
         acknowledge_proposed_change(sst);
     };
 
     auto leader_committed_changes = [this](const DerechoSST& gmsSST) {
-        return gmsSST.num_committed[curr_view->rank_of_leader()]
+        return gmsSST.num_committed[curr_view->find_rank_of_leader()]
                > gmsSST.num_installed[curr_view->my_rank];
     };
     auto view_change_trig = [this](DerechoSST& sst) { start_meta_wedge(sst); };
@@ -730,67 +708,96 @@ void ViewManager::register_predicates() {
 /* ------------- 2. Predicate-Triggers That Implement View Management Logic ---------- */
 
 void ViewManager::new_suspicion(DerechoSST& gmsSST) {
+    // keep calm?
+    if(bSilent) {
+        return;
+    }
+
     dbg_default_debug("Suspected[] changed");
     View& Vc = *curr_view;
-    int myRank = curr_view->my_rank;
+    const int my_rank = curr_view->my_rank;
+    //Cache this before changing failed[], so we can see if the leader changed
+    const int old_leader_rank = curr_view->find_rank_of_leader();
     int num_left = 0;
     // Aggregate suspicions into gmsSST[myRank].Suspected;
     for(int r = 0; r < Vc.num_members; r++) {
         for(int who = 0; who < Vc.num_members; who++) {
-            gmssst::set(gmsSST.suspected[myRank][who],
-                        gmsSST.suspected[myRank][who] || gmsSST.suspected[r][who]);
+            gmssst::set(gmsSST.suspected[my_rank][who],
+                        gmsSST.suspected[my_rank][who] || gmsSST.suspected[r][who]);
         }
         if(gmsSST.rip[r]) {
             num_left++;
         }
     }
 
-    for(int q = 0; q < Vc.num_members; q++) {
-        // if(gmsSST.suspected[myRank][q] && !Vc.failed[q]) {
-        if(gmsSST.suspected[myRank][q] && !last_suspected[q]) {
+    for(int rank = 0; rank < Vc.num_members; rank++) {
+        if(gmsSST.suspected[my_rank][rank] && !last_suspected[rank]) {
             // This is safer than copy_suspected, since suspected[] might change during this loop
-            last_suspected[q] = gmsSST.suspected[myRank][q];
-            dbg_default_debug("Marking {} failed", Vc.members[q]);
+            last_suspected[rank] = gmsSST.suspected[my_rank][rank];
+            dbg_default_debug("Marking {} failed", Vc.members[rank]);
 
-            if(!gmsSST.rip[myRank] && Vc.num_failed != 0 && (Vc.num_failed - num_left >= (Vc.num_members - num_left + 1) / 2)) {
-                throw derecho_exception("Potential partitioning event: this node is no longer in the majority and must shut down!");
+            if(!gmsSST.rip[my_rank] && Vc.num_failed != 0
+               && (Vc.num_failed - num_left >= (Vc.num_members - num_left + 1) / 2)) {
+                if(disable_partitioning_safety) {
+                    dbg_default_warn("Potential partitioning event, but partitioning safety is disabled. num_failed - num_left = {} but num_members - num_left + 1 = {}",
+                                     Vc.num_failed - num_left, Vc.num_members - num_left + 1);
+                } else {
+                    throw derecho_exception("Potential partitioning event: this node is no longer in the majority and must shut down!");
+                }
             }
 
-            dbg_default_debug("GMS telling SST to freeze row {}", q);
-            gmsSST.freeze(q);  // Cease to accept new updates from q
+            dbg_default_debug("GMS telling SST to freeze row {}", rank);
+            gmsSST.freeze(rank);
+            //These two lines are the same as Vc.wedge()
             Vc.multicast_group->wedge();
-            gmssst::set(gmsSST.wedged[myRank], true);  // RDMC has halted new sends and receives in theView
-            Vc.failed[q] = true;
+            gmssst::set(gmsSST.wedged[my_rank], true);
+            //Synchronize Vc.failed with gmsSST.suspected
+            Vc.failed[rank] = true;
             Vc.num_failed++;
 
-            if(!gmsSST.rip[myRank] && Vc.num_failed != 0 && (Vc.num_failed - num_left >= (Vc.num_members - num_left + 1) / 2)) {
-                throw derecho_exception("Potential partitioning event: this node is no longer in the majority and must shut down!");
+            if(!gmsSST.rip[my_rank] && Vc.num_failed != 0
+               && (Vc.num_failed - num_left >= (Vc.num_members - num_left + 1) / 2)) {
+                if(disable_partitioning_safety) {
+                    dbg_default_warn("Potential partitioning event, but partitioning safety is disabled. num_failed - num_left = {} but num_members - num_left + 1 = {}",
+                                     Vc.num_failed - num_left, Vc.num_members - num_left + 1);
+                } else {
+                    throw derecho_exception("Potential partitioning event: this node is no longer in the majority and must shut down!");
+                }
             }
 
             // push change to gmsSST.suspected[myRank]
-            gmsSST.put(gmsSST.suspected.get_base() - gmsSST.getBaseAddress(),
-                       gmsSST.changes.get_base() - gmsSST.suspected.get_base());
+            gmsSST.put(gmsSST.suspected);
             // push change to gmsSST.wedged[myRank]
-            gmsSST.put(gmsSST.wedged.get_base() - gmsSST.getBaseAddress(),
-                       sizeof(gmsSST.wedged[0]));
-            if(Vc.i_am_leader() && !changes_contains(gmsSST, Vc.members[q]))  // Leader initiated
-            {
-                const int next_change_index = gmsSST.num_changes[myRank] - gmsSST.num_installed[myRank];
+            gmsSST.put(gmsSST.wedged);
+            const int new_leader_rank = Vc.find_rank_of_leader();
+            //Only propose the change if there was no change in leadership
+            if(my_rank == new_leader_rank && my_rank == old_leader_rank
+               && !changes_contains(gmsSST, Vc.members[rank])) {
+                const int next_change_index = gmsSST.num_changes[my_rank] - gmsSST.num_installed[my_rank];
                 if(next_change_index == (int)gmsSST.changes.size()) {
-                    throw derecho_exception("Ran out of room in the pending changes list");
+                    throw derecho_exception("Ran out of room in the pending changes list!");
                 }
 
-                gmssst::set(gmsSST.changes[myRank][next_change_index],
-                            Vc.members[q]);  // Reports the failure (note that q NotIn members)
-                gmssst::increment(gmsSST.num_changes[myRank]);
-                dbg_default_debug("Leader proposed a change to remove failed node {}", Vc.members[q]);
-                gmsSST.put(
-                        (char*)std::addressof(gmsSST.changes[0][next_change_index]) - gmsSST.getBaseAddress(),
-                        sizeof(gmsSST.changes[0][next_change_index]));
-                gmsSST.put(gmsSST.num_changes.get_base() - gmsSST.getBaseAddress(),
-                           sizeof(gmsSST.num_changes[0]));
+                gmssst::set(gmsSST.changes[my_rank][next_change_index],
+                            Vc.members[rank]);  // Reports the failure
+                gmssst::increment(gmsSST.num_changes[my_rank]);
+                dbg_default_debug("Leader proposed a change to remove failed node {}", Vc.members[rank]);
+                gmsSST.put(gmsSST.changes, next_change_index);
+                gmsSST.put(gmsSST.num_changes);
             }
         }
+    }
+    //Determine if the detected failures made me the new leader, and register the takeover predicate
+    if(my_rank == Vc.find_rank_of_leader() && my_rank != old_leader_rank) {
+        dbg_default_debug("The current leader failed, so this node will take over as leader");
+        auto leader_change_finished = [this](const DerechoSST& sst) {
+            return curr_view->i_am_leader() && previous_leaders_suspected(sst, *curr_view);
+        };
+        auto leader_change_trigger = [this](DerechoSST& sst) {
+            new_leader_takeover(sst);
+        };
+        gmsSST.predicates.insert(leader_change_finished, leader_change_trigger,
+                                 sst::PredicateType::ONE_TIME);
     }
 }
 
@@ -808,7 +815,7 @@ void ViewManager::leader_start_join(DerechoSST& gmsSST) {
                                      pending_join_sockets_locked.access,
                                      pending_join_sockets_locked.access.begin());
     }
-    bool success = receive_join(proposed_join_sockets.back());
+    bool success = receive_join(gmsSST, proposed_join_sockets.back());
     //If the join failed, close the socket
     if(!success) proposed_join_sockets.pop_back();
 }
@@ -825,28 +832,61 @@ void ViewManager::redirect_join_attempt(DerechoSST& gmsSST) {
     client_socket.write(JoinResponse{JoinResponseCode::LEADER_REDIRECT,
                                      curr_view->members[curr_view->my_rank]});
     //Send the client the IP address of the current leader
+    const int rank_of_leader = curr_view->find_rank_of_leader();
     client_socket.write(mutils::bytes_size(std::get<0>(
-            curr_view->member_ips_and_ports[curr_view->rank_of_leader()])));
+            curr_view->member_ips_and_ports[rank_of_leader])));
     auto bind_socket_write = [&client_socket](const char* bytes, std::size_t size) {
         client_socket.write(bytes, size);
     };
     mutils::post_object(bind_socket_write,
-                        std::get<0>(curr_view->member_ips_and_ports[curr_view->rank_of_leader()]));
+                        std::get<0>(curr_view->member_ips_and_ports[rank_of_leader]));
     client_socket.write(std::get<PORT_TYPE::GMS>(
-            curr_view->member_ips_and_ports[curr_view->rank_of_leader()]));
+            curr_view->member_ips_and_ports[rank_of_leader]));
+}
+
+void ViewManager::new_leader_takeover(DerechoSST& gmsSST) {
+    bool changes_copied = copy_prior_leader_proposals(gmsSST);
+    dbg_default_debug("Taking over as the new leader; everyone suspects prior leaders.");
+    //For each node that I suspect, make sure a change is proposed to remove it
+    const unsigned int my_rank = gmsSST.get_local_index();
+    for(int rank = 0; rank < curr_view->num_members; ++rank) {
+        if(gmsSST.suspected[my_rank][rank]
+           && !changes_contains(gmsSST, curr_view->members[rank])) {
+            const int next_change_index = gmsSST.num_changes[my_rank] - gmsSST.num_installed[my_rank];
+            if(next_change_index == (int)gmsSST.changes.size()) {
+                throw derecho_exception("Ran out of room in the pending changes list!");
+            }
+
+            gmssst::set(gmsSST.changes[my_rank][next_change_index],
+                        curr_view->members[rank]);
+            gmssst::increment(gmsSST.num_changes[my_rank]);
+            dbg_default_debug("Leader proposed a change to remove failed node {}", curr_view->members[rank]);
+            //If changes were copied, we'll have to push the whole vector
+            //otherwise we can just push the new element
+            if(!changes_copied) {
+                gmsSST.put(gmsSST.changes, next_change_index);
+                gmsSST.put(gmsSST.num_changes);
+            }
+        }
+    }
+    if(changes_copied) {
+        gmsSST.put(gmsSST.changes);
+        gmsSST.put(gmsSST.num_changes);
+    }
+    //I am now "awake" as the leader and can take new actions
+    active_leader = true;
 }
 
 void ViewManager::leader_commit_change(DerechoSST& gmsSST) {
     gmssst::set(gmsSST.num_committed[gmsSST.get_local_index()],
                 min_acked(gmsSST, curr_view->failed));  // Leader commits a new request
     dbg_default_debug("Leader committing change proposal #{}", gmsSST.num_committed[gmsSST.get_local_index()]);
-    gmsSST.put(gmsSST.num_committed.get_base() - gmsSST.getBaseAddress(),
-               sizeof(gmsSST.num_committed[0]));
+    gmsSST.put(gmsSST.num_committed);
 }
 
 void ViewManager::acknowledge_proposed_change(DerechoSST& gmsSST) {
-    int myRank = gmsSST.get_local_index();
-    int leader = curr_view->rank_of_leader();
+    const int myRank = gmsSST.get_local_index();
+    const int leader = curr_view->find_rank_of_leader();
     dbg_default_debug("Detected that leader proposed change #{}. Acknowledging.", gmsSST.num_changes[leader]);
     if(myRank != leader) {
         // Echo the count
@@ -874,18 +914,14 @@ void ViewManager::acknowledge_proposed_change(DerechoSST& gmsSST) {
     /* breaking the above put statement into individual put calls, to be sure that
      * if we were relying on any ordering guarantees, we won't run into issue when
      * guarantees do not hold*/
-    gmsSST.put(gmsSST.changes.get_base() - gmsSST.getBaseAddress(),
-               gmsSST.joiner_ips.get_base() - gmsSST.changes.get_base());
+    gmsSST.put(gmsSST.changes);
+    //This pushes the contiguous set of joiner_xxx_ports fields all at once
     gmsSST.put(gmsSST.joiner_ips.get_base() - gmsSST.getBaseAddress(),
                gmsSST.num_changes.get_base() - gmsSST.joiner_ips.get_base());
-    gmsSST.put(gmsSST.num_changes.get_base() - gmsSST.getBaseAddress(),
-               gmsSST.num_committed.get_base() - gmsSST.num_changes.get_base());
-    gmsSST.put(gmsSST.num_committed.get_base() - gmsSST.getBaseAddress(),
-               gmsSST.num_acked.get_base() - gmsSST.num_committed.get_base());
-    gmsSST.put(gmsSST.num_acked.get_base() - gmsSST.getBaseAddress(),
-               gmsSST.num_installed.get_base() - gmsSST.num_acked.get_base());
-    gmsSST.put(gmsSST.num_installed.get_base() - gmsSST.getBaseAddress(),
-               gmsSST.num_received.get_base() - gmsSST.num_installed.get_base());
+    gmsSST.put(gmsSST.num_changes);
+    gmsSST.put(gmsSST.num_committed);
+    gmsSST.put(gmsSST.num_acked);
+    gmsSST.put(gmsSST.num_installed);
     dbg_default_debug("Wedging current view.");
     curr_view->wedge();
     dbg_default_debug("Done wedging current view.");
@@ -942,11 +978,11 @@ void ViewManager::terminate_epoch(DerechoSST& gmsSST) {
             gmsSST.predicates.remove(leader_committed_handle);
         }
         // Construct a predicate that watches for any new committed change that is a join
-        int curr_num_committed = gmsSST.num_committed[curr_view->rank_of_leader()];
+        int curr_num_committed = gmsSST.num_committed[curr_view->find_rank_of_leader()];
         auto leader_committed_change = [this, curr_num_committed](const DerechoSST& gmsSST) {
-            return gmsSST.num_committed[curr_view->rank_of_leader()] > curr_num_committed;
+            return gmsSST.num_committed[curr_view->find_rank_of_leader()] > curr_num_committed;
         };
-        // Construct a trigger that will re-call finish_view_change() with the same parameters
+        // Construct a trigger that will re-call terminate_epoch()
         auto retry_next_view = [this](DerechoSST& sst) {
             terminate_epoch(sst);
         };
@@ -972,14 +1008,15 @@ void ViewManager::terminate_epoch(DerechoSST& gmsSST) {
             }
         }
         // wait for all pending sst sends to finish
+        dbg_default_debug("Waiting for pending SST sends to finish");
         while(curr_view->multicast_group->check_pending_sst_sends(subgroup_id)) {
         }
-        curr_view->gmsSST->put_with_completion();
-        curr_view->gmsSST->sync_with_members(
+        gmsSST.put_with_completion();
+        gmsSST.sync_with_members(
                 curr_view->multicast_group->get_shard_sst_indices(subgroup_id));
         while(curr_view->multicast_group->receiver_predicate(
-                subgroup_id, curr_subgroup_settings, shard_ranks_by_sender_rank,
-                num_shard_senders, *curr_view->gmsSST)) {
+                curr_subgroup_settings, shard_ranks_by_sender_rank,
+                num_shard_senders, gmsSST)) {
             auto sst_receive_handler_lambda =
                     [this, subgroup_id, curr_subgroup_settings,
                      shard_ranks_by_sender_rank, num_shard_senders](
@@ -990,20 +1027,21 @@ void ViewManager::terminate_epoch(DerechoSST& gmsSST) {
                     };
             curr_view->multicast_group->receiver_function(
                     subgroup_id, curr_subgroup_settings, shard_ranks_by_sender_rank,
-                    num_shard_senders, *curr_view->gmsSST,
-                    curr_view->multicast_group->window_size, sst_receive_handler_lambda);
+                    num_shard_senders, gmsSST,
+                    curr_subgroup_settings.profile.window_size, sst_receive_handler_lambda);
         }
     }
 
-    curr_view->gmsSST->put_with_completion();
-    curr_view->gmsSST->sync_with_members();
+    gmsSST.put_with_completion();
+    dbg_default_debug("Doing an SST sync_with_members");
+    gmsSST.sync_with_members();
 
-    // First, for subgroups in which I'm the shard leader, do RaggedEdgeCleanup for the leader
+    // For subgroups in which I'm the shard leader, do RaggedEdgeCleanup for the leader
     auto follower_subgroups_and_shards = std::make_shared<std::map<subgroup_id_t, uint32_t>>();
     for(const auto& shard_settings_pair : curr_view->multicast_group->get_subgroup_settings()) {
         const subgroup_id_t subgroup_id = shard_settings_pair.first;
         const uint32_t shard_num = shard_settings_pair.second.shard_num;
-        SubView& shard_view = curr_view->subgroup_shard_views.at(subgroup_id).at(shard_num);
+        const SubView& shard_view = curr_view->subgroup_shard_views.at(subgroup_id).at(shard_num);
         uint num_shard_senders = 0;
         for(auto v : shard_view.is_sender) {
             if(v) num_shard_senders++;
@@ -1023,89 +1061,133 @@ void ViewManager::terminate_epoch(DerechoSST& gmsSST) {
     }
 
     // Wait for the shard leaders of subgroups I'm not a leader in to post
-    // global_min_ready before continuing
-    auto leader_global_mins_are_ready =
-            [this, follower_subgroups_and_shards](const DerechoSST& gmsSST) {
-                for(const auto& subgroup_shard_pair : *follower_subgroups_and_shards) {
-                    SubView& shard_view = curr_view->subgroup_shard_views.at(subgroup_shard_pair.first)
-                                                  .at(subgroup_shard_pair.second);
-                    node_id_t shard_leader = shard_view.members.at(
-                            curr_view->subview_rank_of_shard_leader(
-                                    subgroup_shard_pair.first, subgroup_shard_pair.second));
-                    if(!gmsSST.global_min_ready[curr_view->rank_of(shard_leader)]
-                                               [subgroup_shard_pair.first])
-                        return false;
-                }
-                return true;
-            };
+    // global_min_ready before continuing.
+    auto leader_global_mins_are_ready = [this, follower_subgroups_and_shards](const DerechoSST& gmsSST) {
+        for(const auto& subgroup_shard_pair : *follower_subgroups_and_shards) {
+            const SubView& shard_view = curr_view->subgroup_shard_views.at(subgroup_shard_pair.first)
+                                                .at(subgroup_shard_pair.second);
+            node_id_t shard_leader = shard_view.members.at(
+                    curr_view->subview_rank_of_shard_leader(subgroup_shard_pair.first,
+                                                            subgroup_shard_pair.second));
+            if(!gmsSST.global_min_ready[curr_view->rank_of(shard_leader)][subgroup_shard_pair.first]) {
+                return false;
+            }
+        }
+        return true;
+    };
 
-    auto global_min_ready_continuation =
-            [this, follower_subgroups_and_shards](DerechoSST& gmsSST) {
-                dbg_default_debug("GlobalMins are ready for all {} subgroup leaders this node is waiting on", follower_subgroups_and_shards->size());
-                // Finish RaggedEdgeCleanup for subgroups in which I'm not the leader
-                for(const auto& subgroup_shard_pair : *follower_subgroups_and_shards) {
-                    const subgroup_id_t subgroup_id = subgroup_shard_pair.first;
-                    const uint32_t shard_num = subgroup_shard_pair.second;
-                    SubView& shard_view = curr_view->subgroup_shard_views.at(subgroup_id)
-                                                  .at(shard_num);
-                    uint num_shard_senders = 0;
-                    for(auto v : shard_view.is_sender) {
-                        if(v)
-                            num_shard_senders++;
-                    }
-                    node_id_t shard_leader = shard_view.members[curr_view->subview_rank_of_shard_leader(
-                            subgroup_id, shard_num)];
-                    follower_ragged_edge_cleanup(
-                            subgroup_id,
-                            curr_view->rank_of(shard_leader),
-                            curr_view->multicast_group->get_subgroup_settings()
-                                    .at(subgroup_id)
-                                    .num_received_offset,
-                            shard_view.members, num_shard_senders);
-                }
+    auto global_min_ready_continuation = [this, follower_subgroups_and_shards](DerechoSST& gmsSST) {
+        echo_ragged_trim(follower_subgroups_and_shards, gmsSST);
+    };
 
-                // Wait for persistence to finish for messages delivered in RaggedEdgeCleanup
-                auto persistence_finished_pred = [this](const DerechoSST& gmsSST) {
-                    // For each subgroup/shard that this node is a member of...
-                    for(auto subgroup_shard_pair : curr_view->my_subgroups) {
-                        subgroup_id_t subgroup_id = subgroup_shard_pair.first;
-                        const uint32_t shard_num = subgroup_shard_pair.second;
-                        if(curr_view->subgroup_shard_views.at(subgroup_id).at(shard_num).mode == Mode::UNORDERED) {
-                            // Skip non-ordered subgroups, they never do persistence
-                            continue;
-                        }
-                        message_id_t last_delivered_seq_num = gmsSST.delivered_num[curr_view->my_rank][subgroup_id];
-                        // For each member of that shard...
-                        for(const node_id_t& shard_member : curr_view->subgroup_shard_views.at(subgroup_id).at(shard_num).members) {
-                            uint member_row = curr_view->rank_of(shard_member);
-                            // Check to see if the member persisted up to the ragged edge trim
-                            if(!curr_view->failed[member_row]
-                               && persistent::unpack_version<int32_t>(gmsSST.persisted_num[member_row][subgroup_id]).second < last_delivered_seq_num) {
-                                return false;
-                            }
-                        }
-                    }
-                    return true;
-                };
-
-                auto finish_view_change_trig =
-                        [this, follower_subgroups_and_shards](DerechoSST& gmsSST) {
-                            finish_view_change(follower_subgroups_and_shards, gmsSST);
-                        };
-
-                // Last statement in global_min_ready_continuation: register finish_view_change_trig
-                gmsSST.predicates.insert(persistence_finished_pred, finish_view_change_trig,
-                                         sst::PredicateType::ONE_TIME);
-            };
-
-    // Last statement in finish_view_change: register global_min_ready_continuation
     gmsSST.predicates.insert(leader_global_mins_are_ready, global_min_ready_continuation,
                              sst::PredicateType::ONE_TIME);
 }
 
-void ViewManager::finish_view_change(
+void ViewManager::echo_ragged_trim(
         std::shared_ptr<std::map<subgroup_id_t, uint32_t>> follower_subgroups_and_shards,
         DerechoSST& gmsSST) {
+    dbg_default_debug("GlobalMins are ready for all {} subgroup leaders this node is waiting on", follower_subgroups_and_shards->size());
+    // Call RaggedEdgeCleanup for subgroups in which I'm not the leader
+    for(const auto& subgroup_shard_pair : *follower_subgroups_and_shards) {
+        const subgroup_id_t subgroup_id = subgroup_shard_pair.first;
+        const uint32_t shard_num = subgroup_shard_pair.second;
+        SubView& shard_view = curr_view->subgroup_shard_views.at(subgroup_id).at(shard_num);
+        uint num_shard_senders = 0;
+        for(auto v : shard_view.is_sender) {
+            if(v) num_shard_senders++;
+        }
+        node_id_t shard_leader = shard_view.members[curr_view->subview_rank_of_shard_leader(
+                subgroup_id, shard_num)];
+        follower_ragged_edge_cleanup(
+                subgroup_id,
+                curr_view->rank_of(shard_leader),
+                curr_view->multicast_group->get_subgroup_settings().at(subgroup_id).num_received_offset,
+                num_shard_senders);
+    }
+
+    //Now, for all subgroups I'm in (leader or not), wait for everyone to have echoed the leader's
+    //global_min_ready before delivering any messages; this means they have seen and logged the ragged trim
+    auto everyone_echoed_pred = [this](const DerechoSST& gmsSST) {
+        for(const auto& subgroup_shard_pair : curr_view->my_subgroups) {
+            const SubView& shard_view = curr_view->subgroup_shard_views.at(subgroup_shard_pair.first)
+                                                .at(subgroup_shard_pair.second);
+            for(const node_id_t shard_member : shard_view.members) {
+                int shard_member_rank = curr_view->rank_of(shard_member);
+                //Always check failed before reading an SST row
+                if(!curr_view->failed[shard_member_rank]
+                   && !gmsSST.global_min_ready[shard_member_rank][subgroup_shard_pair.first]) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+
+    auto deliver_ragged_trim_trig = [this](DerechoSST& gmsSST) {
+        deliver_ragged_trim(gmsSST);
+    };
+
+    gmsSST.predicates.insert(everyone_echoed_pred, deliver_ragged_trim_trig,
+                             sst::PredicateType::ONE_TIME);
+}
+
+void ViewManager::deliver_ragged_trim(DerechoSST& gmsSST) {
+    dbg_default_debug("GlobalMin has been echoed by everyone for all {} subgroups this node is in", curr_view->my_subgroups.size());
+    for(const auto& subgroup_shard_pair : curr_view->my_subgroups) {
+        const subgroup_id_t subgroup_id = subgroup_shard_pair.first;
+        const uint32_t shard_num = subgroup_shard_pair.second;
+        const SubView& shard_view = curr_view->subgroup_shard_views.at(subgroup_id).at(shard_num);
+        node_id_t shard_leader = shard_view.members.at(
+                curr_view->subview_rank_of_shard_leader(subgroup_id, shard_num));
+        uint num_shard_senders = 0;
+        for(auto v : shard_view.is_sender) {
+            if(v) num_shard_senders++;
+        }
+        deliver_in_order(curr_view->rank_of(shard_leader), subgroup_id,
+                         curr_view->multicast_group->get_subgroup_settings()
+                                 .at(subgroup_id)
+                                 .num_received_offset,
+                         shard_view.members, num_shard_senders);
+    }
+
+    // Wait for persistence to finish for messages delivered in RaggedEdgeCleanup before continuing
+    auto persistence_finished_pred = [this](const DerechoSST& gmsSST) {
+        // For each subgroup/shard that this node is a member of...
+        for(const auto& subgroup_shard_pair : curr_view->my_subgroups) {
+            const subgroup_id_t subgroup_id = subgroup_shard_pair.first;
+            const uint32_t shard_num = subgroup_shard_pair.second;
+            if(curr_view->subgroup_shard_views.at(subgroup_id).at(shard_num).mode == Mode::UNORDERED) {
+                // Skip non-ordered subgroups, they never do persistence
+                continue;
+            }
+            message_id_t last_delivered_seq_num = gmsSST.delivered_num[curr_view->my_rank][subgroup_id];
+            // For each member of that shard...
+            for(const node_id_t& shard_member :
+                curr_view->subgroup_shard_views.at(subgroup_id).at(shard_num).members) {
+                uint member_row = curr_view->rank_of(shard_member);
+                // Check to see if the member persisted up to the ragged edge trim
+                if(!curr_view->failed[member_row]
+                   && persistent::unpack_version<int32_t>(
+                              gmsSST.persisted_num[member_row][subgroup_id])
+                                      .second
+                              < last_delivered_seq_num) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+
+    auto finish_view_change_trig = [this](DerechoSST& gmsSST) {
+        finish_view_change(gmsSST);
+    };
+
+    gmsSST.predicates.insert(persistence_finished_pred, finish_view_change_trig,
+                             sst::PredicateType::ONE_TIME);
+}
+
+void ViewManager::finish_view_change(DerechoSST& gmsSST) {
     std::unique_lock<std::shared_timed_mutex> write_lock(view_mutex);
 
     // Disable all the other SST predicates, except suspected_changed
@@ -1116,14 +1198,17 @@ void ViewManager::finish_view_change(
 
     // Now that the next_view won't change any more, calculate its subgroup settings
     std::map<subgroup_id_t, SubgroupSettings> next_subgroup_settings;
-    uint32_t next_num_received_size = derive_subgroup_settings(*next_view, next_subgroup_settings);
+    auto sizes = derive_subgroup_settings(*next_view, next_subgroup_settings);
+    uint32_t new_num_received_size = sizes.first;
+    uint32_t new_slot_size = sizes.second;
 
+    dbg_default_debug("Ready to transition to the next View: {}", next_view->debug_string());
     // Determine the shard leaders in the old view and re-index them by new subgroup IDs
     vector_int64_2d old_shard_leaders_by_id = old_shard_leaders_by_new_ids(
             *curr_view, *next_view);
 
     std::list<tcp::socket> joiner_sockets;
-    if(curr_view->i_am_leader() && next_view->joined.size() > 0) {
+    if(active_leader && next_view->joined.size() > 0) {
         // If j joins have been committed, pop the next j sockets off
         // proposed_join_sockets and send them the new View and old shard
         // leaders list
@@ -1154,7 +1239,7 @@ void ViewManager::finish_view_change(
     initialize_subgroup_objects(my_id, *next_view, old_shard_leaders_by_id);
 
     // Once state transfer completes, we can tell joining clients to commit the view
-    if(curr_view->i_am_leader()) {
+    if(active_leader) {
         for(auto& joiner_socket : joiner_sockets) {
             //Eventually, we could check for success here and abort the view if a node failed
             joiner_socket.write(CommitMessage::PREPARE);
@@ -1207,12 +1292,12 @@ void ViewManager::finish_view_change(
     }
 
     // This will block until everyone responds to SST/RDMC initial handshakes
-    transition_multicast_group(next_subgroup_settings, next_num_received_size);
+    transition_multicast_group(next_subgroup_settings, new_num_received_size, new_slot_size);
 
     // New members can now proceed to view_manager.start(), which will call sync()
     next_view->gmsSST->put();
     next_view->gmsSST->sync_with_members();
-    dbg_default_debug("Done setting up SST and DerechoGroup for view {}", next_view->vid);
+    dbg_default_debug("Done setting up SST and MulticastGroup for view {}", next_view->vid);
     {
         lock_guard_t old_views_lock(old_views_mutex);
         old_views.push(std::move(curr_view));
@@ -1233,7 +1318,9 @@ void ViewManager::finish_view_change(
 
     // First task with my new view...
     if(curr_view->i_am_new_leader()) {
+        dbg_default_debug("i_am_new_leader() was true, calling merge_changes()");
         curr_view->merge_changes();  // Create a combined list of Changes
+        active_leader = true;
     }
 
     // Announce the new view to the application
@@ -1243,51 +1330,52 @@ void ViewManager::finish_view_change(
 
     curr_view->gmsSST->start_predicate_evaluation();
     view_change_cv.notify_all();
+    dbg_default_debug("Done with view change to view {}", curr_view->vid);
 }
 
-/* ------------- 3. Helper Functions for Predicates and Triggers -------------
- */
+/* ------------- 3. Helper Functions for Predicates and Triggers ------------- */
 
 void ViewManager::construct_multicast_group(CallbackSet callbacks,
                                             const std::map<subgroup_id_t, SubgroupSettings>& subgroup_settings,
-                                            const uint32_t num_received_size) {
+                                            const uint32_t num_received_size,
+                                            const uint32_t slot_size) {
     const auto num_subgroups = curr_view->subgroup_shard_views.size();
+
     curr_view->gmsSST = std::make_shared<DerechoSST>(
             sst::SSTParams(curr_view->members, curr_view->members[curr_view->my_rank],
                            [this](const uint32_t node_id) { report_failure(node_id); },
                            curr_view->failed, false),
-            num_subgroups, num_received_size, derecho_params.window_size,
-            derecho_params.max_smc_payload_size + sizeof(header) + 2 * sizeof(uint64_t));
+            num_subgroups, num_received_size, slot_size);
 
     curr_view->multicast_group = std::make_unique<MulticastGroup>(
             curr_view->members, curr_view->members[curr_view->my_rank],
             curr_view->gmsSST, callbacks, num_subgroups, subgroup_settings,
-            derecho_params,
-            [this](const subgroup_id_t& subgroup_id, const persistent::version_t& ver) {
+            view_max_sender_timeout,
+            [this](const subgroup_id_t& subgroup_id, const persistent::version_t& ver, const uint64_t& msg_ts) {
                 assert(subgroup_objects.find(subgroup_id) != subgroup_objects.end());
-                subgroup_objects.at(subgroup_id).get().post_next_version(ver);
+                subgroup_objects.at(subgroup_id).get().post_next_version(ver, msg_ts);
             },
             persistence_manager_callbacks, curr_view->failed);
 }
 
 void ViewManager::transition_multicast_group(
         const std::map<subgroup_id_t, SubgroupSettings>& new_subgroup_settings,
-        const uint32_t new_num_received_size) {
+        const uint32_t new_num_received_size, const uint32_t new_slot_size) {
     const auto num_subgroups = next_view->subgroup_shard_views.size();
+
     next_view->gmsSST = std::make_shared<DerechoSST>(
             sst::SSTParams(next_view->members, next_view->members[next_view->my_rank],
                            [this](const uint32_t node_id) { report_failure(node_id); },
                            next_view->failed, false),
-            num_subgroups, new_num_received_size, derecho_params.window_size,
-            derecho_params.max_smc_payload_size + sizeof(header) + 2 * sizeof(uint64_t));
+            num_subgroups, new_num_received_size, new_slot_size);
 
     next_view->multicast_group = std::make_unique<MulticastGroup>(
             next_view->members, next_view->members[next_view->my_rank],
             next_view->gmsSST, std::move(*curr_view->multicast_group), num_subgroups,
             new_subgroup_settings,
-            [this](const subgroup_id_t& subgroup_id, const persistent::version_t& ver) {
+            [this](const subgroup_id_t& subgroup_id, const persistent::version_t& ver, const uint64_t& msg_ts) {
                 assert(subgroup_objects.find(subgroup_id) != subgroup_objects.end());
-                subgroup_objects.at(subgroup_id).get().post_next_version(ver);
+                subgroup_objects.at(subgroup_id).get().post_next_version(ver, msg_ts);
             },
             persistence_manager_callbacks, next_view->failed);
 
@@ -1300,8 +1388,7 @@ void ViewManager::transition_multicast_group(
     gmssst::set(next_view->gmsSST->vid[next_view->my_rank], next_view->vid);
 }
 
-bool ViewManager::receive_join(tcp::socket& client_socket) {
-    DerechoSST& gmsSST = *curr_view->gmsSST;
+bool ViewManager::receive_join(DerechoSST& gmsSST, tcp::socket& client_socket) {
     struct in_addr joiner_ip_packed;
     inet_aton(client_socket.get_remote_ip().c_str(), &joiner_ip_packed);
 
@@ -1356,12 +1443,10 @@ bool ViewManager::receive_join(tcp::socket& client_socket) {
     /* breaking the above put statement into individual put calls, to be sure
      * that if we were relying on any ordering guarantees, we won't run into
      * issue when guarantees do not hold*/
-    gmsSST.put(gmsSST.changes.get_base() - gmsSST.getBaseAddress(),
-               gmsSST.joiner_ips.get_base() - gmsSST.changes.get_base());
+    gmsSST.put(gmsSST.changes);
     gmsSST.put(gmsSST.joiner_ips.get_base() - gmsSST.getBaseAddress(),
                gmsSST.num_changes.get_base() - gmsSST.joiner_ips.get_base());
-    gmsSST.put(gmsSST.num_changes.get_base() - gmsSST.getBaseAddress(),
-               gmsSST.num_committed.get_base() - gmsSST.num_changes.get_base());
+    gmsSST.put(gmsSST.num_changes);
     return true;
 }
 
@@ -1373,9 +1458,6 @@ void ViewManager::send_view(const View& new_view, tcp::socket& client_socket) {
     std::size_t size_of_view = mutils::bytes_size(new_view);
     client_socket.write(size_of_view);
     mutils::post_object(bind_socket_write, new_view);
-    std::size_t size_of_derecho_params = mutils::bytes_size(derecho_params);
-    client_socket.write(size_of_derecho_params);
-    mutils::post_object(bind_socket_write, derecho_params);
 }
 
 void ViewManager::send_objects_to_new_members(const View& new_view, const vector_int64_2d& old_shard_leaders) {
@@ -1413,6 +1495,19 @@ void ViewManager::send_subgroup_object(subgroup_id_t subgroup_id, node_id_t new_
     }
     dbg_default_debug("Sending Replicated Object state for subgroup {} to node {}", subgroup_id, new_node_id);
     subgroup_object.send_object(joiner_socket.get());
+}
+
+void ViewManager::update_tcp_connections(const View& new_view) {
+    for(const node_id_t& removed_id : new_view.departed) {
+        dbg_default_debug("Removing TCP connection for failed node {}", removed_id);
+        tcp_sockets->delete_node(removed_id);
+    }
+    for(const node_id_t& joiner_id : new_view.joined) {
+        tcp_sockets->add_node(joiner_id,
+                              {std::get<0>(new_view.member_ips_and_ports[new_view.rank_of(joiner_id)]),
+                               std::get<PORT_TYPE::RPC>(new_view.member_ips_and_ports[new_view.rank_of(joiner_id)])});
+        dbg_default_debug("Established a TCP connection to node {}", joiner_id);
+    }
 }
 
 uint32_t ViewManager::compute_num_received_size(const View& view) {
@@ -1489,21 +1584,29 @@ void ViewManager::make_subgroup_maps(const SubgroupInfo& subgroup_info,
     }
 }
 
-uint32_t ViewManager::derive_subgroup_settings(View& view,
-                                               std::map<subgroup_id_t, SubgroupSettings>& subgroup_settings) {
+std::pair<uint32_t, uint32_t> ViewManager::derive_subgroup_settings(View& view,
+                                                                    std::map<subgroup_id_t, SubgroupSettings>& subgroup_settings) {
     uint32_t num_received_offset = 0;
+    uint32_t slot_offset = 0;
     view.my_subgroups.clear();
     for(subgroup_id_t subgroup_id = 0; subgroup_id < view.subgroup_shard_views.size(); ++subgroup_id) {
         uint32_t num_shards = view.subgroup_shard_views.at(subgroup_id).size();
         uint32_t max_shard_senders = 0;
+        uint32_t slot_size_for_subgroup = 0;
+        uint64_t max_payload_size = 0;
 
         for(uint32_t shard_num = 0; shard_num < num_shards; ++shard_num) {
             SubView& shard_view = view.subgroup_shard_views.at(subgroup_id).at(shard_num);
-            std::size_t shard_size = shard_view.members.size();
-            uint32_t num_shard_senders = shard_view.num_senders();
-            if(num_shard_senders > max_shard_senders) {
-                max_shard_senders = shard_size;  //really? why not max_shard_senders = num_shard_senders?
-            }
+            max_shard_senders = std::max(shard_view.num_senders(), max_shard_senders);
+
+            const DerechoParams& profile = DerechoParams::from_profile(shard_view.profile);
+            uint32_t slot_size_for_shard = profile.window_size * (profile.sst_max_msg_size + 2 * sizeof(uint64_t));
+            uint64_t payload_size = profile.max_msg_size - sizeof(header);
+            max_payload_size = std::max(payload_size, max_payload_size);
+            slot_size_for_subgroup = std::max(slot_size_for_shard, slot_size_for_subgroup);
+            view_max_window_size = std::max(profile.window_size, view_max_window_size);
+            view_max_sender_timeout = std::max(profile.heartbeat_ms, view_max_sender_timeout);
+
             //Initialize my_rank in the SubView for this node's ID
             shard_view.my_rank = shard_view.rank_of(view.members[view.my_rank]);
             if(shard_view.my_rank != -1) {
@@ -1517,13 +1620,23 @@ uint32_t ViewManager::derive_subgroup_settings(View& view,
                         shard_view.is_sender,
                         shard_view.sender_rank_of(shard_view.my_rank),
                         num_received_offset,
-                        shard_view.mode};
+                        slot_offset,
+                        shard_view.mode,
+                        profile,
+                };
             }
         }  // for(shard_num)
         num_received_offset += max_shard_senders;
+        slot_offset += slot_size_for_subgroup;
+        max_payload_sizes[subgroup_id] = max_payload_size;
+        view_max_payload_size = std::max(max_payload_size, view_max_payload_size);
     }  // for(subgroup_id)
 
-    return num_received_offset;
+    return {num_received_offset, slot_offset};
+}
+
+std::map<subgroup_id_t, uint64_t> ViewManager::get_max_payload_sizes() {
+    return max_payload_sizes;
 }
 
 std::unique_ptr<View> ViewManager::make_next_view(const std::unique_ptr<View>& curr_view,
@@ -1532,8 +1645,8 @@ std::unique_ptr<View> ViewManager::make_next_view(const std::unique_ptr<View>& c
     std::set<int> leave_ranks;
     std::vector<int> join_indexes;
     // Look through pending changes up to num_committed and filter the joins and leaves
-    const int committed_count = gmsSST.num_committed[curr_view->rank_of_leader()]
-                                - gmsSST.num_installed[curr_view->rank_of_leader()];
+    const int committed_count = gmsSST.num_committed[curr_view->find_rank_of_leader()]
+                                - gmsSST.num_installed[curr_view->find_rank_of_leader()];
     for(int change_index = 0; change_index < committed_count; change_index++) {
         node_id_t change_id = gmsSST.changes[myRank][change_index];
         int change_rank = curr_view->rank_of(change_id);
@@ -1602,7 +1715,7 @@ std::unique_ptr<View> ViewManager::make_next_view(const std::unique_ptr<View>& c
         }
     }
     if(my_new_rank == -1) {
-        throw derecho_exception("Some other node reported that I failed.  Node " + std::to_string(myID) + " terminating");
+        throw derecho_exception("Some other node reported that I failed.  Node " + std::to_string(myID) + " terminating.");
     }
 
     auto next_view = std::make_unique<View>(
@@ -1610,7 +1723,7 @@ std::unique_ptr<View> ViewManager::make_next_view(const std::unique_ptr<View>& c
             departed, my_new_rank, next_unassigned_rank,
             curr_view->subgroup_type_order);
     next_view->i_know_i_am_leader = curr_view->i_know_i_am_leader;
-    return std::move(next_view);
+    return next_view;
 }
 
 vector_int64_2d ViewManager::old_shard_leaders_by_new_ids(const View& curr_view,
@@ -1686,34 +1799,63 @@ int ViewManager::min_acked(const DerechoSST& gmsSST, const std::vector<char>& fa
     return min_num_acked;
 }
 
-void ViewManager::deliver_in_order(const int shard_leader_rank,
-                                   const uint32_t subgroup_num, const uint32_t num_received_offset,
-                                   const std::vector<node_id_t>& shard_members, uint num_shard_senders) {
-    // Ragged cleanup is finished, deliver in the implied order
-    const View& Vc = *curr_view;
-    std::vector<int32_t> max_received_indices(num_shard_senders);
-    std::stringstream delivery_order;
-    for(uint sender_rank = 0; sender_rank < num_shard_senders; sender_rank++) {
-        whenlog(if(LoggerFactory::getDefaultLogger()->should_log(spdlog::level::debug)) {
-            delivery_order << "Subgroup " << subgroup_num
-                           << ", shard " << Vc.my_subgroups.at(subgroup_num)
-                           << " " << Vc.members[Vc.my_rank]
-                           << ":0..."
-                           << Vc.gmsSST->global_min[shard_leader_rank][num_received_offset + sender_rank]
-                           << " ";
-        });
-        max_received_indices[sender_rank]
-                = Vc.gmsSST->global_min[shard_leader_rank][num_received_offset + sender_rank];
+bool ViewManager::previous_leaders_suspected(const DerechoSST& gmsSST, const View& curr_view) {
+    const int rank_of_leader = curr_view.find_rank_of_leader();
+    //For each non-failed member, check if that node suspects all ranks lower than the current leader
+    for(uint row = 0; row < gmsSST.get_num_rows(); ++row) {
+        if(!curr_view.failed[row]) {
+            for(int previous_leader_rank = 0;
+                previous_leader_rank < rank_of_leader;
+                ++previous_leader_rank) {
+                if(!gmsSST.suspected[row][previous_leader_rank]) {
+                    return false;
+                }
+            }
+        }
     }
-    if(any_persistent_objects) {
-        uint32_t shard_num = Vc.my_subgroups.at(subgroup_num);
-        RaggedTrim trim_log{subgroup_num, shard_num, Vc.vid,
-                            static_cast<int32_t>(Vc.members[Vc.rank_of_leader()]), max_received_indices};
-        dbg_default_debug("Logging ragged trim to disk");
-        persistent::saveObject(trim_log, ragged_trim_filename(subgroup_num, shard_num).c_str());
+    return true;
+}
+
+bool ViewManager::copy_prior_leader_proposals(DerechoSST& gmsSST) {
+    const int my_rank = gmsSST.get_local_index();
+    const int my_changes_length = gmsSST.num_changes[my_rank] - gmsSST.num_installed[my_rank];
+    bool prior_changes_found = false;
+    int prior_leader_rank = my_rank;
+    while(!prior_changes_found && prior_leader_rank > 0) {
+        prior_leader_rank--;
+        const int changes_length = gmsSST.num_changes[prior_leader_rank]
+                                   - gmsSST.num_installed[prior_leader_rank];
+        if(changes_length > my_changes_length) {
+            prior_changes_found = true;
+        } else {
+            //Check each element of changes, in case this node acknowledged a different leader's change
+            for(int i = 0; i < changes_length; ++i) {
+                if(gmsSST.changes[prior_leader_rank][i] != gmsSST.changes[my_rank][i]) {
+                    prior_changes_found = true;
+                    break;
+                }
+            }
+        }
     }
-    dbg_default_debug("Delivering ragged-edge messages in order: {}", delivery_order.str());
-    Vc.multicast_group->deliver_messages_upto(max_received_indices, subgroup_num, num_shard_senders);
+    //Copy the prior leader's changes over mine;
+    //this function is called before proposing any changes as the new leader
+    if(prior_changes_found) {
+        dbg_default_debug("Re-proposing changes from prior leader at rank {}. Num_changes is now {}", prior_leader_rank, gmsSST.num_changes[prior_leader_rank]);
+        gmssst::set(gmsSST.changes[my_rank], gmsSST.changes[prior_leader_rank],
+                    gmsSST.changes.size());
+        gmssst::set(gmsSST.num_changes[my_rank], gmsSST.num_changes[prior_leader_rank]);
+        gmssst::set(gmsSST.joiner_ips[my_rank], gmsSST.joiner_ips[prior_leader_rank],
+                    gmsSST.joiner_ips.size());
+        gmssst::set(gmsSST.joiner_gms_ports[my_rank], gmsSST.joiner_gms_ports[prior_leader_rank],
+                    gmsSST.joiner_gms_ports.size());
+        gmssst::set(gmsSST.joiner_rpc_ports[my_rank], gmsSST.joiner_rpc_ports[prior_leader_rank],
+                    gmsSST.joiner_rpc_ports.size());
+        gmssst::set(gmsSST.joiner_sst_ports[my_rank], gmsSST.joiner_sst_ports[prior_leader_rank],
+                    gmsSST.joiner_sst_ports.size());
+        gmssst::set(gmsSST.joiner_rdmc_ports[my_rank], gmsSST.joiner_rdmc_ports[prior_leader_rank],
+                    gmsSST.joiner_rdmc_ports.size());
+    }
+    return prior_changes_found;
 }
 
 void ViewManager::leader_ragged_edge_cleanup(const subgroup_id_t subgroup_num,
@@ -1724,17 +1866,20 @@ void ViewManager::leader_ragged_edge_cleanup(const subgroup_id_t subgroup_num,
     View& Vc = *curr_view;
     int myRank = Vc.my_rank;
     bool found = false;
+    //Look to see if another node (i.e. a previous leader) has already set global_min_ready
     for(uint n = 0; n < shard_members.size() && !found; n++) {
         const auto node_id = shard_members[n];
         const auto node_rank = Vc.rank_of(node_id);
         if(Vc.gmsSST->global_min_ready[node_rank][subgroup_num]) {
-            gmssst::set(Vc.gmsSST->global_min[myRank] + num_received_offset,
-                        Vc.gmsSST->global_min[node_rank] + num_received_offset, num_shard_senders);
+            //Copy this shard's slice of global_min, starting at num_received_offset
+            gmssst::set(&Vc.gmsSST->global_min[myRank][num_received_offset],
+                        &Vc.gmsSST->global_min[node_rank][num_received_offset], num_shard_senders);
             found = true;
         }
     }
 
     if(!found) {
+        //Compute the global_min for this shard
         for(uint n = 0; n < num_shard_senders; n++) {
             int min_num_received = Vc.gmsSST->num_received[myRank][num_received_offset + n];
             for(uint r = 0; r < shard_members.size(); r++) {
@@ -1755,51 +1900,96 @@ void ViewManager::leader_ragged_edge_cleanup(const subgroup_id_t subgroup_num,
             Vc.multicast_group->get_shard_sst_indices(subgroup_num),
             (char*)std::addressof(Vc.gmsSST->global_min[0][num_received_offset]) - Vc.gmsSST->getBaseAddress(),
             sizeof(Vc.gmsSST->global_min[0][num_received_offset]) * num_shard_senders);
-    Vc.gmsSST->put(
-            Vc.multicast_group->get_shard_sst_indices(subgroup_num),
-            (char*)std::addressof(Vc.gmsSST->global_min_ready[0][subgroup_num]) - Vc.gmsSST->getBaseAddress(),
-            sizeof(Vc.gmsSST->global_min_ready[0][subgroup_num]));
+    Vc.gmsSST->put(Vc.multicast_group->get_shard_sst_indices(subgroup_num),
+                   Vc.gmsSST->global_min_ready, subgroup_num);
 
-    deliver_in_order(myRank, subgroup_num, num_received_offset, shard_members,
-                     num_shard_senders);
-    dbg_default_debug("Done with RaggedEdgeCleanup for subgroup {}", subgroup_num);
+    if(any_persistent_objects) {
+        log_ragged_trim(myRank, subgroup_num, num_received_offset, num_shard_senders);
+    }
 }
 
 void ViewManager::follower_ragged_edge_cleanup(
         const subgroup_id_t subgroup_num, uint shard_leader_rank,
         const uint32_t num_received_offset,
-        const std::vector<node_id_t>& shard_members,
         uint num_shard_senders) {
     const View& Vc = *curr_view;
     int myRank = Vc.my_rank;
-    // Learn the leader's data and push it before acting upon it
-    dbg_default_debug("Running follower RaggedEdgeCleanup for subgroup {}; echoing leader's global_min", subgroup_num);
-    gmssst::set(Vc.gmsSST->global_min[myRank] + num_received_offset,
-                Vc.gmsSST->global_min[shard_leader_rank] + num_received_offset,
+    dbg_default_debug("Running follower RaggedEdgeCleanup for subgroup {}", subgroup_num);
+    // Learn the leader's ragged trim, log it, and echo it before acting upon it
+    if(any_persistent_objects) {
+        log_ragged_trim(shard_leader_rank, subgroup_num, num_received_offset, num_shard_senders);
+    }
+    //Copy this shard's slice of global_min, starting at num_received_offset
+    gmssst::set(&Vc.gmsSST->global_min[myRank][num_received_offset],
+                &Vc.gmsSST->global_min[shard_leader_rank][num_received_offset],
                 num_shard_senders);
     gmssst::set(Vc.gmsSST->global_min_ready[myRank][subgroup_num], true);
     Vc.gmsSST->put(
             Vc.multicast_group->get_shard_sst_indices(subgroup_num),
             (char*)std::addressof(Vc.gmsSST->global_min[0][num_received_offset]) - Vc.gmsSST->getBaseAddress(),
             sizeof(Vc.gmsSST->global_min[0][num_received_offset]) * num_shard_senders);
-    Vc.gmsSST->put(
-            Vc.multicast_group->get_shard_sst_indices(subgroup_num),
-            (char*)std::addressof(Vc.gmsSST->global_min_ready[0][subgroup_num]) - Vc.gmsSST->getBaseAddress(),
-            sizeof(Vc.gmsSST->global_min_ready[0][subgroup_num]));
-    deliver_in_order(shard_leader_rank, subgroup_num, num_received_offset,
-                     shard_members, num_shard_senders);
-    dbg_default_debug("Done with RaggedEdgeCleanup for subgroup {}", subgroup_num);
+    Vc.gmsSST->put(Vc.multicast_group->get_shard_sst_indices(subgroup_num),
+                   Vc.gmsSST->global_min_ready, subgroup_num);
+}
+
+void ViewManager::deliver_in_order(const int shard_leader_rank,
+                                   const uint32_t subgroup_num, const uint32_t num_received_offset,
+                                   const std::vector<node_id_t>& shard_members, uint num_shard_senders) {
+    // Ragged cleanup is finished, deliver in the implied order
+    const View& Vc = *curr_view;
+    std::vector<int32_t> max_received_indices(num_shard_senders);
+    whenlog(std::stringstream delivery_order);
+    whenlog(if(LoggerFactory::getDefaultLogger()->should_log(spdlog::level::debug)) {
+        delivery_order << "Subgroup " << subgroup_num
+                       << ", shard " << Vc.my_subgroups.at(subgroup_num)
+                       << " ";
+    });
+    for(uint sender_rank = 0; sender_rank < num_shard_senders; sender_rank++) {
+        whenlog(if(LoggerFactory::getDefaultLogger()->should_log(spdlog::level::debug)) {
+            //This only works if every member is a sender, otherwise the rank will be wrong
+            delivery_order << shard_members[sender_rank]
+                           << ":0..."
+                           << Vc.gmsSST->global_min[shard_leader_rank][num_received_offset + sender_rank]
+                           << " ";
+        });
+        max_received_indices[sender_rank]
+                = Vc.gmsSST->global_min[shard_leader_rank][num_received_offset + sender_rank];
+    }
+    dbg_default_debug("Delivering ragged-edge messages in order: {}", delivery_order.str());
+    Vc.multicast_group->deliver_messages_upto(max_received_indices, subgroup_num, num_shard_senders);
+}
+
+void ViewManager::log_ragged_trim(const int shard_leader_rank,
+                                  const subgroup_id_t subgroup_num,
+                                  const uint32_t num_received_offset,
+                                  const uint num_shard_senders) {
+    //Copy this shard's slice of global_min into a new vector
+    std::vector<int32_t> max_received_indices(num_shard_senders);
+    for(uint sender_rank = 0; sender_rank < num_shard_senders; sender_rank++) {
+        max_received_indices[sender_rank]
+                = curr_view->gmsSST->global_min[shard_leader_rank][num_received_offset + sender_rank];
+    }
+    uint32_t shard_num = curr_view->my_subgroups.at(subgroup_num);
+    RaggedTrim trim_log{subgroup_num, shard_num, curr_view->vid,
+                        static_cast<int32_t>(curr_view->members[curr_view->find_rank_of_leader()]),
+                        max_received_indices};
+    persistent::saveObject(trim_log, ragged_trim_filename(subgroup_num, shard_num).c_str());
+    dbg_default_debug("Done logging ragged trim to disk for subgroup {}", subgroup_num);
 }
 
 /* ------------- 4. Public-Interface methods of ViewManager ------------- */
 
 void ViewManager::report_failure(const node_id_t who) {
-    int r = curr_view->rank_of(who);
-    dbg_default_debug("Node ID {} failure reported; marking suspected[{}]", who, r);
-    curr_view->gmsSST->suspected[curr_view->my_rank][r] = true;
+    // keep calm
+    if(bSilent) {
+        return;
+    }
+    const int failed_rank = curr_view->rank_of(who);
+    dbg_default_debug("Node ID {} failure reported; marking suspected[{}]", who, failed_rank);
+    gmssst::set(curr_view->gmsSST->suspected[curr_view->my_rank][failed_rank], true);
     int failed_cnt = 0;
     int rip_cnt = 0;
-    for(r = 0; r < (int)curr_view->gmsSST->suspected.size(); r++) {
+    for(std::size_t r = 0; r < curr_view->gmsSST->suspected.size(); r++) {
         if(curr_view->gmsSST->rip[r]) {
             ++rip_cnt;
         } else if(curr_view->gmsSST->suspected[curr_view->my_rank][r]) {
@@ -1807,12 +1997,20 @@ void ViewManager::report_failure(const node_id_t who) {
         }
     }
 
-    if(!curr_view->gmsSST->rip[curr_view->my_rank] && failed_cnt != 0 && (failed_cnt >= (curr_view->num_members - rip_cnt + 1) / 2)) {
-        throw derecho_exception("Potential partitioning event: this node is no longer in the majority and must shut down!");
+    if(!curr_view->gmsSST->rip[curr_view->my_rank]
+       && failed_cnt != 0 && (failed_cnt >= (curr_view->num_members - rip_cnt + 1) / 2)) {
+        if(disable_partitioning_safety) {
+            dbg_default_warn("Potential partitioning event, but partitioning safety is disabled. failed_cnt = {} but num_members - rip_cnt + 1 = {}",
+                             failed_cnt, curr_view->num_members - rip_cnt + 1);
+        } else {
+            throw derecho_exception("Potential partitioning event: this node is no longer in the majority and must shut down!");
+        }
     }
-    curr_view->gmsSST->put(
-            (char*)std::addressof(curr_view->gmsSST->suspected[0][r]) - curr_view->gmsSST->getBaseAddress(),
-            sizeof(curr_view->gmsSST->suspected[0][r]));
+    curr_view->gmsSST->put(curr_view->gmsSST->suspected, failed_rank);
+}
+
+void ViewManager::silence() {
+    bSilent = true;
 }
 
 void ViewManager::leave() {
@@ -1820,11 +2018,8 @@ void ViewManager::leave() {
     dbg_default_debug("Cleanly leaving the group.");
     curr_view->multicast_group->wedge();
     curr_view->gmsSST->predicates.clear();
-    curr_view->gmsSST->suspected[curr_view->my_rank][curr_view->my_rank] = true;
-    curr_view->gmsSST->put(
-            (char*)std::addressof(curr_view->gmsSST->suspected[0][curr_view->my_rank])
-                    - curr_view->gmsSST->getBaseAddress(),
-            sizeof(curr_view->gmsSST->suspected[0][curr_view->my_rank]));
+    gmssst::set(curr_view->gmsSST->suspected[curr_view->my_rank][curr_view->my_rank], true);
+    curr_view->gmsSST->put(curr_view->gmsSST->suspected, curr_view->my_rank);
     curr_view->gmsSST->rip[curr_view->my_rank] = true;
     curr_view->gmsSST->put_with_completion(curr_view->gmsSST->rip.get_base() - curr_view->gmsSST->getBaseAddress(),
                                            sizeof(curr_view->gmsSST->rip[0]));

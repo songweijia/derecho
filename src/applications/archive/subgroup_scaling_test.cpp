@@ -60,7 +60,7 @@ int main(int argc, char *argv[]) {
 
         Conf::initialize(argc, argv);
 
-        uint64_t max_msg_size = getConfUInt64(CONF_DERECHO_MAX_PAYLOAD_SIZE);
+        uint64_t max_msg_size = getConfUInt64(CONF_SUBGROUP_DEFAULT_MAX_PAYLOAD_SIZE);
         uint32_t num_messages = ((max_msg_size < 20000) ? 10000 : 1000);
 
         uint32_t node_id = getConfUInt32(CONF_DERECHO_LOCAL_ID);
@@ -81,8 +81,7 @@ int main(int argc, char *argv[]) {
         for(uint i = 0; i < subgroup_size; ++i) {
             received_message_indices[i].resize(subgroup_size, -1);
         }
-        auto stability_callback = [&num_messages,
-                                   &num_nodes,
+        auto stability_callback = [&num_nodes,
                                    subgroup_to_local_index,
                                    &received_message_indices](uint32_t subgroup_num, int sender_id, long long int index,
                                                               std::optional<std::pair<char*, long long int>> data, persistent::version_t ver) mutable {

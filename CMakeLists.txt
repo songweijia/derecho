@@ -7,11 +7,16 @@ project(derecho CXX)
 set(derecho_VERSION 0.9)
 set(derecho_build_VERSION 0.9.1)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++1z")
-set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS} -O0 -Wall -ggdb -gdwarf-3 -pg")
-set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS} -O3 -Wall -DNOLOG")
-set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS} -O3 -Wall -ggdb -gdwarf-3 -DNOLOG")
+set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -O0 -Wall -ggdb -gdwarf-3")
+set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -Wall -DNOLOG")
+set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO} -Wall -ggdb -gdwarf-3 -DNOLOG")
 
 set(CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake/Modules")
+
+if ( NOT DEFINED CMAKE_INSTALL_LIBDIR )
+    set( CMAKE_INSTALL_LIBDIR lib )
+endif ( )
+
 include(GetGitRevisionDescription)
 
 # mutils_FOUND 
@@ -87,7 +92,7 @@ add_dependencies(derecho
 
 # make install
 install(TARGETS derecho EXPORT derecho
-        LIBRARY DESTINATION lib)
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
 install(DIRECTORY
         include/derecho/conf
         include/derecho/core

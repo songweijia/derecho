@@ -18,7 +18,7 @@ Replicated<T>::Replicated(subgroup_type_id_t type_id, node_id_t nid, subgroup_id
         : persistent_registry_ptr(std::make_unique<persistent::PersistentRegistry>(
                   this, std::type_index(typeid(T)), subgroup_index, shard_num)),
           user_object_ptr(std::make_unique<std::unique_ptr<T>>(
-                  client_object_factory(persistent_registry_ptr.get()))),
+                  client_object_factory(persistent_registry_ptr.get(),subgroup_id))),
           node_id(nid),
           subgroup_id(subgroup_id),
           subgroup_index(subgroup_index),
@@ -75,7 +75,6 @@ template <typename T>
 template <rpc::FunctionTag tag, typename... Args>
 auto Replicated<T>::p2p_send(node_id_t dest_node, Args&&... args) {
     if(is_valid()) {
-        assert(dest_node != node_id);
         if(group_rpc_manager.view_manager.get_current_view().get().rank_of(dest_node) == -1) {
             throw invalid_node_exception("Cannot send a p2p request to node "
                     + std::to_string(dest_node) + ": it is not a member of the Group.");
@@ -87,7 +86,7 @@ auto Replicated<T>::p2p_send(node_id_t dest_node, Args&&... args) {
                         return (char*)group_rpc_manager.get_sendbuffer_ptr(dest_node,
                                                                            sst::REQUEST_TYPE::P2P_REQUEST);
                     } else {
-                        return nullptr;
+                        throw derecho_exception("The size of serialized args exceeds the maximum message size.");
                     }
                 },
                 std::forward<Args>(args)...);
@@ -116,7 +115,7 @@ auto Replicated<T>::ordered_send(Args&&... args) {
                         if(size <= max_payload_size) {
                             return buffer;
                         } else {
-                            return nullptr;
+                            throw derecho_exception("The size of serialized args exceeds the maximum message size.");
                         }
                     },
                     std::forward<Args>(args)...);
@@ -229,7 +228,7 @@ auto ExternalCaller<T>::p2p_send(node_id_t dest_node, Args&&... args) {
                         return (char*)group_rpc_manager.get_sendbuffer_ptr(dest_node,
                                                                            sst::REQUEST_TYPE::P2P_REQUEST);
                     } else {
-                        return nullptr;
+                        throw derecho_exception("The size of serialized args exceeds the maximum message size.");
                     }
                 },
                 std::forward<Args>(args)...);

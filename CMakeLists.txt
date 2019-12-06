@@ -136,5 +136,8 @@ install(FILES
 # objectstore aka dPods
 add_subdirectory(src/objectstore)
 
+# cascade
+add_subdirectory(src/cascade)
+
 # applications
 add_subdirectory(src/applications)

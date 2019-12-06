@@ -547,7 +547,7 @@ void Persistent<ObjectType, storageType>::applyLogTail(mutils::DeserializationMa
     this->m_pLog->applyLogTail(v);
 }
 
-#if defined(_PERFORMANCE_DEBUG) || defined(DERECHO_DEBUG)
+#if defined(_PERFORMANCE_DEBUG)
 template <typename ObjectType,
           StorageType storageType>
 void Persistent<ObjectType, storageType>::print_performance_stat() {

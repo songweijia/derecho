@@ -29,7 +29,7 @@ template<typename KT, typename VT, KT* IK, VT* IV>
 std::tuple<persistent::version_t,uint64_t> VolatileCascadeStore<KT,VT,IK,IV>::remove(const KT& key) {
     debug_enter_func_with_args("key={}",key);
     derecho::Replicated<VolatileCascadeStore>& subgroup_handle = group->template get_subgroup<VolatileCascadeStore>(this->subgroup_id);
-    auto results = subgroup_handle.ordered_send<RPC_NAME(ordered_remove)>(key);
+    auto results = subgroup_handle.template ordered_send<RPC_NAME(ordered_remove)>(key);
     auto& replies = results.get();
     std::tuple<persistent::version_t,uint64_t> ret(INVALID_VERSION,0);
     // TODO: verify consistency ?
@@ -48,7 +48,7 @@ const VT VolatileCascadeStore<KT,VT,IK,IV>::get(const KT& key, const persistent:
         return *IV;
     }
     derecho::Replicated<VolatileCascadeStore>& subgroup_handle = group->template get_subgroup<VolatileCascadeStore>(this->subgroup_id);
-    auto results = subgroup_handle.ordered_send<RPC_NAME(ordered_get)>(key);
+    auto results = subgroup_handle.template ordered_send<RPC_NAME(ordered_get)>(key);
     auto& replies = results.get();
     // TODO: verify consistency ?
     // for (auto& reply_pair : replies) {
@@ -113,9 +113,9 @@ template<typename KT, typename VT, KT* IK, VT* IV>
 std::unique_ptr<VolatileCascadeStore<KT,VT,IK,IV>> VolatileCascadeStore<KT,VT,IK,IV>::from_bytes(
     mutils::DeserializationManager* dsm, 
     char const* buf) {
-    auto subgroup_id = mutils::from_bytes<decltype(subgroup_id)>(dsm,buf);
-    auto kv_map_ptr = mutils::from_bytes<decltype(kv_map)>(dsm,buf+mutils::bytes_size(subgroup_id));
-    auto volatile_cascade_store_ptr = std::make_unique<VolatileCascadeStore>(subgroup_id,std::move(kv_map_ptr));
+    auto subgroup_id_ptr = mutils::from_bytes<subgroup_id_t>(dsm,buf);
+    auto kv_map_ptr = mutils::from_bytes<std::map<KT,VT>>(dsm,buf+mutils::bytes_size(*subgroup_id_ptr));
+    auto volatile_cascade_store_ptr = std::make_unique<VolatileCascadeStore>(*subgroup_id_ptr,std::move(*kv_map_ptr));
     return volatile_cascade_store_ptr;
 }
 
@@ -145,36 +145,43 @@ VolatileCascadeStore<KT,VT,IK,IV>::VolatileCascadeStore(subgroup_id_t sid, std::
 template<typename KT, typename VT, KT* IK, VT* IV, persistent::StorageType ST>
 std::tuple<persistent::version_t,uint64_t> PersistentCascadeStore<KT,VT,IK,IV,ST>::put(const VT& value) {
     //TODO:
+    return {INVALID_VERSION,0};
 }
 
 template<typename KT, typename VT, KT* IK, VT* IV, persistent::StorageType ST>
 std::tuple<persistent::version_t,uint64_t> PersistentCascadeStore<KT,VT,IK,IV,ST>::remove(const KT& key) {
     //TODO:
+    return {INVALID_VERSION,0};
 }
 
 template<typename KT, typename VT, KT* IK, VT* IV, persistent::StorageType ST>
 const VT PersistentCascadeStore<KT,VT,IK,IV,ST>::get(const KT& key, const persistent::version_t& ver) {
     //TODO:
+    return *IV;
 }
 
 template<typename KT, typename VT, KT* IK, VT* IV, persistent::StorageType ST>
 const VT PersistentCascadeStore<KT,VT,IK,IV,ST>::get_by_time(const KT& key, const uint64_t& ts_us) {
     //TODO:
+    return *IV;
 }
 
 template<typename KT, typename VT, KT* IK, VT* IV, persistent::StorageType ST>
 std::tuple<persistent::version_t,uint64_t> PersistentCascadeStore<KT,VT,IK,IV,ST>::ordered_put(const VT& value) {
     //TODO:
+    return {INVALID_VERSION,0};
 }
 
 template<typename KT, typename VT, KT* IK, VT* IV, persistent::StorageType ST>
 std::tuple<persistent::version_t,uint64_t> PersistentCascadeStore<KT,VT,IK,IV,ST>::ordered_remove(const KT& key) {
     //TODO:
+    return {INVALID_VERSION,0};
 }
 
 template<typename KT, typename VT, KT* IK, VT* IV, persistent::StorageType ST>
 const VT PersistentCascadeStore<KT,VT,IK,IV,ST>::ordered_get(const KT& key) {
     //TODO:
+    return *IV;
 }
 
 }//namespace cascade

@@ -20,7 +20,8 @@ using std::endl;
 using namespace persistent;
 using namespace std::chrono_literals;
 
-namespace objectstore {
+namespace derecho{
+namespace cascade{
 
 class Blob : public mutils::ByteRepresentable {
 public:
@@ -66,13 +67,12 @@ public:
         mutils::context_ptr<Blob> = mutils::context_ptr<Blob>{});
 };
 
-using OID = uint64_t;
-#define INV_OID (0xffffffffffffffffLLU)
+#define INVALID_OBJECT_KEY (0xffffffffffffffffLLU)
 
 class Object : public mutils::ByteRepresentable {
 public:
     mutable std::tuple<persistent::version_t,uint64_t> ver;  // object version
-    OID oid;                            // object_id
+    uint64_t key;                            // object_id
     Blob blob;                          // the object
 
     bool operator==(const Object& other);
@@ -80,16 +80,16 @@ public:
     bool is_valid() const;
 
     // constructor 0 : copy constructor
-    Object(const OID& _oid, const Blob& _blob);
+    Object(const uint64_t& _key, const Blob& _blob);
 
     // constructor 0.5 : copy constructor
-    Object(const std::tuple<persistent::version_t,uint64_t> _ver, const OID& _oid, const Blob& _blob);
+    Object(const std::tuple<persistent::version_t,uint64_t> _ver, const uint64_t& _key, const Blob& _blob);
 
     // constructor 1 : copy consotructor
-    Object(const uint64_t _oid, const char* const _b, const std::size_t _s);
+    Object(const uint64_t _key, const char* const _b, const std::size_t _s);
 
     // constructor 1.5 : copy constructor
-    Object(const std::tuple<persistent::version_t,uint64_t> _ver, const uint64_t _oid, const char* const _b, const std::size_t _s);
+    Object(const std::tuple<persistent::version_t,uint64_t> _ver, const uint64_t _key, const char* const _b, const std::size_t _s);
 
     // TODO: we need a move version for the deserializer.
 
@@ -102,7 +102,11 @@ public:
     // constructor 4 : default invalid constructor
     Object();
 
-    DEFAULT_SERIALIZATION_SUPPORT(Object, ver, oid, blob);
+    DEFAULT_SERIALIZATION_SUPPORT(Object, ver, key, blob);
+
+    // IK and IV for volatile cascade store
+    static uint64_t IK;
+    static Object IV;
 };
 
 inline std::ostream& operator<<(std::ostream& out, const Blob& b) {
@@ -123,8 +127,9 @@ inline std::ostream& operator<<(std::ostream& out, const Blob& b) {
 inline std::ostream& operator<<(std::ostream& out, const Object& o) {
     out << "Object{ver: 0x" << std::hex << std::get<0>(o.ver) << std::dec 
         << ", ts: " << std::get<1>(o.ver) << ", id:"
-        << o.oid << ", data:" << o.blob << "}";
+        << o.key << ", data:" << o.blob << "}";
     return out;
 }
 
-}  // namespace objectstore
+} // namespace cascade
+} // namespace derecho

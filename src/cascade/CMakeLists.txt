@@ -13,7 +13,7 @@ set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}")
 set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO} -ggdb -gdwarf-3 -D_DEBUG -D_PERFORMANCE_DEBUG")
 
 # objectstore tester
-add_executable(sample_cascade_store sample_cascade_store.cpp)
+add_executable(sample_cascade_store sample_cascade_store.cpp object.cpp)
 target_include_directories(sample_cascade_store PRIVATE
     $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
     $<BUILD_INTERFACE:${CMAKE_CURRENT_DIR}>

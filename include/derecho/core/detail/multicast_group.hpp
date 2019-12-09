@@ -129,7 +129,7 @@ struct DerechoParams : public mutils::ByteRepresentable {
         std::string prefix = "SUBGROUP/" + profile + "/";
         for(auto& field : Conf::subgroupProfileFields) {
             if(!hasCustomizedConfKey(prefix + field)) {
-                std::cout << "profile " << profile
+                std::cout << "key " << (prefix + field)
                           << " not found in SUBGROUP section of derecho conf. "
                              "Look at derecho-sample.cfg for more information."
                           << std::endl;

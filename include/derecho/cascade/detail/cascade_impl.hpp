@@ -1,4 +1,6 @@
 #pragma once
+#include <memory>
+#include <map>
 
 namespace derecho {
 namespace cascade {
@@ -9,6 +11,10 @@ namespace cascade {
     dbg_default_debug("Leaving {} with " #format "." , __func__, __VA_ARGS__)
 #define debug_enter_func() dbg_default_debug("Entering {}.")
 #define debug_leave_func() dbg_default_debug("Leaving {}.")
+
+///////////////////////////////////////////////////////////////////////////////
+// 1 - Volatile Cascade Store Implementation
+///////////////////////////////////////////////////////////////////////////////
 
 template<typename KT, typename VT, KT* IK, VT* IV>
 std::tuple<persistent::version_t,uint64_t> VolatileCascadeStore<KT,VT,IK,IV>::put(const VT& value) {
@@ -134,12 +140,213 @@ VolatileCascadeStore<KT,VT,IK,IV>::VolatileCascadeStore(subgroup_id_t sid, const
     debug_leave_func();
 }
 
-template<typename KT, typename VT, KT* IK, VT *IV>
+template<typename KT, typename VT, KT* IK, VT* IV>
 VolatileCascadeStore<KT,VT,IK,IV>::VolatileCascadeStore(subgroup_id_t sid, std::map<KT,VT>&& _kvm):
     subgroup_id(sid),
     kv_map(std::move(_kvm)) {
     debug_enter_func_with_args("sid={}, move to kv_map, size={}",sid,kv_map.size());
     debug_leave_func();
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// 2 - Persistent Cascade Store Implementation
+///////////////////////////////////////////////////////////////////////////////
+template <typename KT, typename VT, KT* IK, VT* IV>
+void DeltaCascadeStoreCore<KT,VT,IK,IV>::_Delta::set_opid(DeltaCascadeStoreCore<KT,VT,IK,IV>::_OPID opid) {
+    assert(buffer != nullptr);
+    assert(capacity >= sizeof(uint32_t));
+    *(DeltaCascadeStoreCore::_OPID*)buffer = opid;
+}
+
+template <typename KT, typename VT, KT* IK, VT* IV>
+void DeltaCascadeStoreCore<KT,VT,IK,IV>::_Delta::set_data_len(const size_t& dlen) {
+    assert(capacity >= (dlen + sizeof(uint32_t)));
+    this->len = dlen + sizeof(uint32_t);
+}
+
+template <typename KT, typename VT, KT* IK, VT* IV>
+char* DeltaCascadeStoreCore<KT,VT,IK,IV>::_Delta::data_ptr() {
+    assert(buffer != nullptr);
+    assert(capacity > sizeof(uint32_t));
+    return buffer + sizeof(uint32_t);
+}
+
+template <typename KT, typename VT, KT* IK, VT *IV>
+void DeltaCascadeStoreCore<KT,VT,IK,IV>::_Delta::calibrate(const size_t& dlen) {
+    size_t new_cap = dlen + sizeof(uint32_t);
+    if(this->capacity >= new_cap) {
+        return;
+    }
+    // calculate new capacity
+    int width = sizeof(size_t) << 3;
+    int right_shift_bits = 1;
+    new_cap--;
+    while(right_shift_bits < width) {
+        new_cap |= new_cap >> right_shift_bits;
+        right_shift_bits = right_shift_bits << 1;
+    }
+    new_cap++;
+    // resize
+    this->buffer = (char*)realloc(buffer, new_cap);
+    if(this->buffer == nullptr) {
+        dbg_default_crit("{}:{} Failed to allocate delta buffer. errno={}", __FILE__, __LINE__, errno);
+        throw derecho::derecho_exception("Failed to allocate delta buffer.");
+    } else {
+        this->capacity = new_cap;
+    }
+}
+
+template <typename KT, typename VT, KT* IK, VT *IV>
+bool DeltaCascadeStoreCore<KT,VT,IK,IV>::_Delta::is_empty() {
+    return (this->len == 0);
+}
+
+template <typename KT, typename VT, KT* IK, VT *IV>
+void DeltaCascadeStoreCore<KT,VT,IK,IV>::_Delta::clean() {
+    this->len = 0;
+}
+
+template <typename KT, typename VT, KT* IK, VT *IV>
+void DeltaCascadeStoreCore<KT,VT,IK,IV>::_Delta::destroy() {
+    if(this->capacity > 0) {
+        free(this->buffer);
+    }
+}
+
+template <typename KT, typename VT, KT* IK, VT *IV>
+void DeltaCascadeStoreCore<KT,VT,IK,IV>::initialize_delta() {
+    delta.buffer = (char*)malloc(DEFAULT_DELTA_BUFFER_CAPACITY);
+    if (delta.buffer == nullptr) {
+        dbg_default_crit("{}:{} Failed to allocate delta buffer. errno={}", __FILE__, __LINE__, errno);
+        throw derecho::derecho_exception("Failed to allocate delta buffer.");
+    }
+    delta.capacity = DEFAULT_DELTA_BUFFER_CAPACITY;
+    delta.len = 0;
+}
+
+template <typename KT, typename VT, KT* IK, VT *IV>
+void DeltaCascadeStoreCore<KT,VT,IK,IV>::finalize_current_delta(const persistent::DeltaFinalizer& df) {
+    df(this->delta.buffer, this->delta.len);
+    this->delta.clean();
+}
+
+template <typename KT, typename VT, KT* IK, VT *IV>
+void DeltaCascadeStoreCore<KT,VT,IK,IV>::apply_delta(char const* const delta) {
+    const char* data = (delta + sizeof(const uint32_t));
+    switch(*static_cast<const uint32_t*>(delta)) {
+        case PUT:
+            apply_ordered_put(*mutils::from_bytes<VT>(nullptr,data));
+            break;
+        case REMOVE:
+            apply_ordered_remove(*mutils::from_bytes<KT>(nullptr,data));
+            break;
+        default:
+            std::cerr << __FILE__ << ":" << __LINE__ << ":" << __func__ << " " << std::endl;
+    };
+}
+
+template <typename KT, typename VT, KT* IK, VT *IV>
+std::unique_ptr<DeltaCascadeStoreCore<KT,VT,IK,IV>> DeltaCascadeStoreCore<KT,VT,IK,IV>::create(mutils::DeserializationManager* dm) {
+    if (dm != nullptr) {
+        try {
+            // TODO: get CascadeWatcher here.
+            return std::make_unique<DeltaCascadeStoreCore<KT,VT,IK,IV>>();
+        } catch (...) {
+        }
+    }
+    return std::make_unique<DeltaCascadeStoreCore<KT,VT,IK,IV>>();
+}
+
+template <typename KT, typename VT, KT* IK, VT *IV>
+void DeltaCascadeStoreCore<KT,VT,IK,IV>::apply_ordered_put(const VT& value) {
+    // put
+    this->kv_map.erase(value.key);
+    this->kv_map.emplace(value.key,value);
+    // TODO: call cascade watcher
+}
+
+template <typename KT, typename VT, KT* IK, VT *IV>
+bool DeltaCascadeStoreCore<KT,VT,IK,IV>::apply_ordered_remove(const KT& key) {
+    bool ret = false;
+    // remove
+    if (this->kv_map.erase(key)) {
+        // TODO: call cascade watcher
+        ret = true;
+    }
+    return ret;
+}
+
+template <typename KT, typename VT, KT* IK, VT *IV>
+bool DeltaCascadeStoreCore<KT,VT,IK,IV>::ordered_put(const VT& value) {
+    // create delta.
+    assert(this->delta.is_empty());
+    this->delta.calibrate(mutils::bytes_size(value));
+    mutils::to_bytes(value,this->delta.data_ptr());
+    this->delta.set_data_len(mutils::bytes_size(value));
+    this->delta.set_opid(DeltaCascadeStoreCore<KT,VT,IK,IV>::PUT);
+    // apply ordered_put
+    apply_ordered_put(value);
+    return true;
+}
+
+template <typename KT, typename VT, KT* IK, VT *IV>
+bool DeltaCascadeStoreCore<KT,VT,IK,IV>::ordered_remove(const KT& key) {
+    // create delta.
+    assert(this->delta.is_empty());
+    this->delta.calibrate(mutils::bytes_size(key));
+    mutils::to_bytes(key,this->delta.data_ptr());
+    this->delta.set_data_len(mutils::bytes_size(key));
+    this->delta.set_opid(DeltaCascadeStoreCore<KT,VT,IK,IV>::REMOVE);
+    // remove
+    return apply_ordered_remove(key);
+}
+
+template <typename KT, typename VT, KT* IK, VT* IV>
+const VT DeltaCascadeStoreCore<KT,VT,IK,IV>::ordered_get(const KT& key) {
+    if (kv_map.find(key) != kv_map.end()) {
+        return kv_map.at(key);
+    } else {
+        return *IV;
+    }
+}
+
+template <typename KT, typename VT, KT* IK, VT* IV>
+std::unique_ptr<DeltaCascadeStoreCore<KT,VT,IK,IV>>
+DeltaCascadeStoreCore<KT,VT,IK,IV>::from_bytes(mutils::DeserializationManager* dsm, char const* buf) {
+    if (dsm != nullptr) {
+        try {
+            // TODO: get cascade watcher from dsm
+            return std::make_unique<DeltaCascadeStoreCore<KT,VT,IK,IV>>(
+                std::move(*mutils::from_bytes<decltype(kv_map)>(dsm,buf).get()));
+        } catch (...) {}
+    }
+    return std::make_unique<DeltaCascadeStoreCore<KT,VT,IK,IV>>(
+        std::move(*mutils::from_bytes<decltype(kv_map)>(dsm,buf).get()));
+}
+
+// TODO: initialize cascade store watcher
+template <typename KT, typename VT, KT* IK, VT* IV>
+DeltaCascadeStoreCore<KT,VT,IK,IV>::DeltaCascadeStoreCore() {
+    initialize_delta();
+}
+
+// TODO: initialize cascade store watcher
+template <typename KT, typename VT, KT* IK, VT* IV>
+DeltaCascadeStoreCore<KT,VT,IK,IV>::DeltaCascadeStoreCore(const std::map<KT,VT>& _kv_map): kv_map(_kv_map) {
+    initialize_delta();
+}
+
+// TODO: initialize cascade store watcher
+template <typename KT, typename VT, KT* IK, VT* IV>
+DeltaCascadeStoreCore<KT,VT,IK,IV>::DeltaCascadeStoreCore(std::map<KT,VT>&& _kv_map): kv_map(_kv_map) {
+    initialize_delta();
+}
+
+template<typename KT, typename VT, KT* IK, VT* IV>
+DeltaCascadeStoreCore<KT,VT,IK,IV>::~DeltaCascadeStoreCore() {
+    if (this->delta.buffer != nullptr) {
+        free(this->delta.buffer);
+    }
 }
 
 template<typename KT, typename VT, KT* IK, VT* IV, persistent::StorageType ST>

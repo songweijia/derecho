@@ -126,6 +126,91 @@ namespace cascade {
     };
 
     /**
+     * Persistent Cascade Store Delta Support
+     */
+    template <typename KT, typename VT, KT* IK, VT* IV>
+    class DeltaCascadeStoreCore : public mutils::ByteRepresentable,
+                                  public persistent::IDeltaSupport<DeltaCascadeStoreCore<KT,VT,IK,IV>> {
+        // TODO: use max payload size in subgroup configuration.
+#define DEFAULT_DELTA_BUFFER_CAPACITY (4096)
+        enum _OPID {
+            PUT,
+            REMOVE
+        };
+        // delta
+        typedef struct {
+            size_t capacity;
+            size_t len;
+            char* buffer;
+            // methods
+            inline void set_opid(_OPID opid); 
+            inline void set_data_len(const size_t& dlen);
+            inline char* data_ptr();
+            inline void calibrate(const size_t& dlen);
+            inline bool is_empty();
+            inline void clean();
+            inline void destroy();
+        } _Delta;
+        _Delta delta;
+        
+        /**
+         * Initialize the delta data structure.
+         */
+        void initialize_delta();
+
+    public:
+        std::map<KT,VT> kv_map;
+
+        //////////////////////////////////////////////////////////////////////////
+        // Delta is represented by an operation id and a list of
+        // argument. The operation id (OPID) is a 4 bytes integer.
+        // 1) put(const Object& object):
+        // [OPID:PUT]   [value]
+        // 2) remove(const KT& key)
+        // [OPID:REMOVE][key]
+        // 3) get(const KT& key)
+        // no need to prepare a delta
+        ///////////////////////////////////////////////////////////////////////////
+        virtual void finalize_current_delta(const persistent::DeltaFinalizer& df) override;
+        virtual void apply_delta(char const* const delta) override;
+        static std::unique_ptr<DeltaCascadeStoreCore<KT,VT,IK,IV>> create(mutils::DeserializationManager* dm);
+        /**
+         * Do ordered put without generating a delta.
+         */
+        inline void apply_ordered_put(const VT& value);
+        /**
+         * Do ordered remove without generating a delta.
+         */
+        inline bool apply_ordered_remove(const KT& key);
+        /**
+         * Ordered put, and generate a delta.
+         */
+        virtual bool ordered_put(const VT& value);
+        /**
+         * Ordered remove, and generate a delta.
+         */
+        virtual bool ordered_remove(const KT& key);
+        /**
+         * ordered get, no need to generate a delta.
+         */
+        virtual const VT ordered_get(const KT& key);
+
+        // serialization supports
+        DEFAULT_SERIALIZE(kv_map);
+        static std::unique_ptr<DeltaCascadeStoreCore> from_bytes(mutils::DeserializationManager* dsm, char const* buf);
+        DEFAULT_DESERIALIZE_NOALLOC(DeltaCascadeStoreCore);
+        void ensure_registered(mutils::DeserializationManager&) {}
+
+        // constructors
+        DeltaCascadeStoreCore();
+        DeltaCascadeStoreCore(const std::map<KT,VT>& _kv_map);
+        DeltaCascadeStoreCore(std::map<KT,VT>&& _kv_map);
+
+        // destructor
+        virtual ~DeltaCascadeStoreCore();
+    };
+
+    /**
      * template for persistent cascade stores.
      * 
      * PersistentCascadeStore is full-fledged implementation with log mechansim. Data can be stored in different
@@ -138,7 +223,7 @@ namespace cascade {
                                    public derecho::GroupReference {
     public:
         using derecho::GroupReference::group;
-        std::map<KT,VT> kv_map;
+        persistent::Persistent<std::map<KT,VT>> kv_map;
         // TODO: const CascadeWatcher cascade_watcher;
         
         REGISTER_RPC_FUNCTIONS(PersistentCascadeStore,

@@ -40,6 +40,21 @@ int main(int argc, char** argv) {
     std::cout << "Finished constructing Derecho group." << std::endl;
 
     // TODO: do something here.
+    std::string odata("cascade test message - ");
+    struct timespec now;
+    clock_gettime(CLOCK_REALTIME,&now);
+    srandom(now.tv_sec);
+    int my_rank = group.get_my_rank();
+    odata += random();
+    Object o(my_rank,odata.c_str(), odata.length() + 1);
+
+    auto& handle = group.template get_subgroup<VolatileCascadeStore<uint64_t,Object,&Object::IK,&Object::IV>>(0);
+
+    derecho::rpc::QueryResults<std::tuple<persistent::version_t,uint64_t>> results = handle.template p2p_send<RPC_NAME(put)>(group.get_my_id(),o);
+    decltype(results)::ReplyMap& replies = results.get();
+    std::tuple<version_t,uint64_t> put_result = replies.begin()->second.get();
+    std::cout << "put returned with version=" << std::get<0>(put_result) 
+              << ", timestamp=" << std::get<1>(put_result) << std::endl;
 
     // Quit
     std::cout << "Press ENTER to stop." << std::endl;

@@ -47,12 +47,11 @@ int main(int argc, char** argv) {
     
     // The derecho group
     derecho::Group<VolatileCascadeStore<uint64_t,Object,&Object::IK,&Object::IV>> 
-        group(callback_set,si,nullptr,
+        group(callback_set,si,nullptr,//TODO: use deserialization manager here.
               std::vector<derecho::view_upcall_t>{},
               volatile_cascade_store_factory);
     std::cout << "Finished constructing Derecho group." << std::endl;
 
-    // TODO: do something here.
     std::string odata("cascade test message - ");
     struct timespec now;
     clock_gettime(CLOCK_REALTIME,&now);

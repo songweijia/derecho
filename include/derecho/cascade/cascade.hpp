@@ -208,10 +208,7 @@ namespace cascade {
         virtual const VT ordered_get(const KT& key);
 
         // serialization supports
-        DEFAULT_SERIALIZE(kv_map);
-        static std::unique_ptr<DeltaCascadeStoreCore> from_bytes(mutils::DeserializationManager* dsm, char const* buf);
-        DEFAULT_DESERIALIZE_NOALLOC(DeltaCascadeStoreCore);
-        void ensure_registered(mutils::DeserializationManager&) {}
+        DEFAULT_SERIALIZATION_SUPPORT(DeltaCascadeStoreCore, kv_map);
 
         // constructors
         DeltaCascadeStoreCore();
@@ -235,8 +232,9 @@ namespace cascade {
                                    public derecho::GroupReference {
     public:
         using derecho::GroupReference::group;
-        persistent::Persistent<std::map<KT,VT>> kv_map;
-        // TODO: const CascadeWatcher cascade_watcher;
+        subgroup_id_t subgroup_id;
+        persistent::Persistent<DeltaCascadeStoreCore<KT,VT,IK,IV>,ST> persistent_cascade_store;
+        const CascadeWatcher<KT,VT,IK,IV> cascade_watcher;
         
         REGISTER_RPC_FUNCTIONS(PersistentCascadeStore,
                                put,
@@ -253,6 +251,24 @@ namespace cascade {
         virtual std::tuple<persistent::version_t,uint64_t> ordered_put(const VT& value) override;
         virtual std::tuple<persistent::version_t,uint64_t> ordered_remove(const KT& key) override;
         virtual const VT ordered_get(const KT& key) override;
+
+        // serialization support
+        DEFAULT_SERIALIZE(subgroup_id,persistent_cascade_store);
+
+        static std::unique_ptr<PersistentCascadeStore> from_bytes(mutils::DeserializationManager* dsm, char const* buf);
+
+        DEFAULT_DESERIALIZE_NOALLOC(PersistentCascadeStore);
+
+        void ensure_registered(mutils::DeserializationManager&) {}
+
+        // constructors
+        PersistentCascadeStore(subgroup_id_t sid,const CascadeWatcher<KT,VT,IK,IV>& cw);
+        PersistentCascadeStore(subgroup_id_t sid,
+                               persistent::Persistent<DeltaCascadeStoreCore<KT,VT,IK,IV>>&& _persistent_cascade_store,
+                               const CascadeWatcher<KT,VT,IK,IV>& cw); // move persistent_cascade_store
+
+        // destructor
+        virtual ~PersistentCascadeStore();
     };
 } // namespace cascade
 } // namespace derecho

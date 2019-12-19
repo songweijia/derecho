@@ -264,7 +264,6 @@ template <typename KT, typename VT, KT* IK, VT *IV>
 std::unique_ptr<DeltaCascadeStoreCore<KT,VT,IK,IV>> DeltaCascadeStoreCore<KT,VT,IK,IV>::create(mutils::DeserializationManager* dm) {
     if (dm != nullptr) {
         try {
-            // TODO: get CascadeWatcher here.
             return std::make_unique<DeltaCascadeStoreCore<KT,VT,IK,IV>>();
         } catch (...) {
         }
@@ -277,7 +276,6 @@ void DeltaCascadeStoreCore<KT,VT,IK,IV>::apply_ordered_put(const VT& value) {
     // put
     this->kv_map.erase(value.key);
     this->kv_map.emplace(value.key,value);
-    // TODO: call cascade watcher
 }
 
 template <typename KT, typename VT, KT* IK, VT *IV>
@@ -285,7 +283,6 @@ bool DeltaCascadeStoreCore<KT,VT,IK,IV>::apply_ordered_remove(const KT& key) {
     bool ret = false;
     // remove
     if (this->kv_map.erase(key)) {
-        // TODO: call cascade watcher
         ret = true;
     }
     return ret;
@@ -326,32 +323,15 @@ const VT DeltaCascadeStoreCore<KT,VT,IK,IV>::ordered_get(const KT& key) {
 }
 
 template <typename KT, typename VT, KT* IK, VT* IV>
-std::unique_ptr<DeltaCascadeStoreCore<KT,VT,IK,IV>>
-DeltaCascadeStoreCore<KT,VT,IK,IV>::from_bytes(mutils::DeserializationManager* dsm, char const* buf) {
-    if (dsm != nullptr) {
-        try {
-            // TODO: get cascade watcher from dsm
-            return std::make_unique<DeltaCascadeStoreCore<KT,VT,IK,IV>>(
-                std::move(*mutils::from_bytes<decltype(kv_map)>(dsm,buf).get()));
-        } catch (...) {}
-    }
-    return std::make_unique<DeltaCascadeStoreCore<KT,VT,IK,IV>>(
-        std::move(*mutils::from_bytes<decltype(kv_map)>(dsm,buf).get()));
-}
-
-// TODO: initialize cascade store watcher
-template <typename KT, typename VT, KT* IK, VT* IV>
 DeltaCascadeStoreCore<KT,VT,IK,IV>::DeltaCascadeStoreCore() {
     initialize_delta();
 }
 
-// TODO: initialize cascade store watcher
 template <typename KT, typename VT, KT* IK, VT* IV>
 DeltaCascadeStoreCore<KT,VT,IK,IV>::DeltaCascadeStoreCore(const std::map<KT,VT>& _kv_map): kv_map(_kv_map) {
     initialize_delta();
 }
 
-// TODO: initialize cascade store watcher
 template <typename KT, typename VT, KT* IK, VT* IV>
 DeltaCascadeStoreCore<KT,VT,IK,IV>::DeltaCascadeStoreCore(std::map<KT,VT>&& _kv_map): kv_map(_kv_map) {
     initialize_delta();
@@ -366,45 +346,129 @@ DeltaCascadeStoreCore<KT,VT,IK,IV>::~DeltaCascadeStoreCore() {
 
 template<typename KT, typename VT, KT* IK, VT* IV, persistent::StorageType ST>
 std::tuple<persistent::version_t,uint64_t> PersistentCascadeStore<KT,VT,IK,IV,ST>::put(const VT& value) {
-    //TODO:
-    return {INVALID_VERSION,0};
+    debug_enter_func_with_args("value.key={}",value.key);
+    derecho::Replicated<PersistentCascadeStore>& subgroup_handle = group->template get_subgroup<PersistentCascadeStore>(this->subgroup_id);
+    auto results = subgroup_handle.template ordered_send<RPC_NAME(ordered_put)>(value);
+    auto& replies = results.get();
+    std::tuple<persistent::version_t,uint64_t> ret(INVALID_VERSION,0);
+    // TODO: verfiy consistency ?
+    for (auto& reply_pair : replies) {
+        ret = reply_pair.second.get();
+    }
+    debug_leave_func_with_value("version=0x{:x},timestamp={}",std::get<0>(ret),std::get<1>(ret));
+    return ret;
 }
 
 template<typename KT, typename VT, KT* IK, VT* IV, persistent::StorageType ST>
 std::tuple<persistent::version_t,uint64_t> PersistentCascadeStore<KT,VT,IK,IV,ST>::remove(const KT& key) {
-    //TODO:
-    return {INVALID_VERSION,0};
+    debug_enter_func_with_args("key={}",key);
+    derecho::Replicated<PersistentCascadeStore>& subgroup_handle = group->template get_subgroup<PersistentCascadeStore>(this->subgroup_id);
+    auto results = subgroup_handle.template ordered_send<RPC_NAME(ordered_remove)>(key);
+    auto& replies = results.get();
+    std::tuple<persistent::version_t,uint64_t> ret(INVALID_VERSION,0);
+    // TODO: verify consistency ?
+    for (auto& reply_pair : replies) {
+        ret = reply_pair.second.get();
+    }
+    debug_leave_func_with_value("version=0x{:x},timestamp={}",std::get<0>(ret),std::get<1>(ret));
+    return ret;
 }
 
 template<typename KT, typename VT, KT* IK, VT* IV, persistent::StorageType ST>
 const VT PersistentCascadeStore<KT,VT,IK,IV,ST>::get(const KT& key, const persistent::version_t& ver) {
-    //TODO:
-    return *IV;
+    debug_enter_func_with_args("key={},ver=0x{:x}",key,ver);
+    if (ver != INVALID_VERSION) {
+        debug_leave_func_with_value("Cannot support versioned get, ver=0x{:x}", ver);
+        return *IV;
+    }
+    derecho::Replicated<PersistentCascadeStore>& subgroup_handle = group->template get_subgroup<PersistentCascadeStore>(this->subgroup_id);
+    auto results = subgroup_handle.template ordered_send<RPC_NAME(ordered_get)>(key);
+    auto& replies = results.get();
+    // TODO: verify consistency ?
+    // for (auto& reply_pair : replies) {
+    //     ret = reply_pair.second.get();
+    // }
+    debug_leave_func();
+    return replies.begin()->second.get();
 }
 
 template<typename KT, typename VT, KT* IK, VT* IV, persistent::StorageType ST>
 const VT PersistentCascadeStore<KT,VT,IK,IV,ST>::get_by_time(const KT& key, const uint64_t& ts_us) {
-    //TODO:
+    debug_enter_func_with_args("key={},ts_us={}",key,ts_us);
+    const HLC hlc(ts_us,0ull);
+    try {
+        debug_leave_func();
+        return persistent_cascade_store.get(hlc)->kv_map.at(key);
+    } catch (const int64_t &ex) {
+        dbg_default_warn("temporal query throws exception:0x{:x}. key={}, ts={}", ex, key, ts_us);
+    } catch (...) {
+        dbg_default_warn("temporal query throws unknown exception. key={}, ts={}", key, ts_us);
+    }
+    debug_leave_func();
     return *IV;
 }
 
 template<typename KT, typename VT, KT* IK, VT* IV, persistent::StorageType ST>
 std::tuple<persistent::version_t,uint64_t> PersistentCascadeStore<KT,VT,IK,IV,ST>::ordered_put(const VT& value) {
-    //TODO:
-    return {INVALID_VERSION,0};
+    debug_enter_func_with_args("key={}",value.key);
+
+    std::tuple<persistent::version_t,uint64_t> version = group->template get_subgroup<PersistentCascadeStore>(this->subgroup_id).get_next_version();
+    this->persistent_cascade_store.ordered_put(value);
+    value.ver = version;
+    if (cascade_watcher) {
+        cascade_watcher(this->subgroup_id,
+            group->template get_subgroup<PersistentCascadeStore>(this->subgroup_id).get_shard_num(),
+            value.key, value);
+    }
+
+    debug_leave_func_with_value("version=0x{:x},timestamp={}",std::get<0>(version), std::get<1>(version));
+
+    return version;
 }
 
 template<typename KT, typename VT, KT* IK, VT* IV, persistent::StorageType ST>
 std::tuple<persistent::version_t,uint64_t> PersistentCascadeStore<KT,VT,IK,IV,ST>::ordered_remove(const KT& key) {
-    //TODO:
-    return {INVALID_VERSION,0};
+    debug_enter_func_with_args("key={}",key);
+
+    std::tuple<persistent::version_t,uint64_t> version = group->template get_subgroup<PersistentCascadeStore>(this->subgroup_id).get_next_version();
+    if(this->persistent_cascade_store.ordered_remove.erase(key)) {
+        if (cascade_watcher) {
+            cascade_watcher(this->subgroup_id,
+                group->template get_subgroup<PersistentCascadeStore>(this->subgroup_id).get_shard_num(),
+                key, *IV);
+        }
+    }
+
+    debug_leave_func_with_value("version=0x{:x},timestamp={}",std::get<0>(version), std::get<1>(version));
+    
+    return version;
 }
 
 template<typename KT, typename VT, KT* IK, VT* IV, persistent::StorageType ST>
 const VT PersistentCascadeStore<KT,VT,IK,IV,ST>::ordered_get(const KT& key) {
-    //TODO:
-    return *IV;
+    debug_enter_func_with_args("key={}",key);
+
+    debug_leave_func();
+
+    return this->persistent_cascade_store.ordered_get(key);
 }
+
+template<typename KT, typename VT, KT* IK, VT* IV, persistent::StorageType ST>
+PersistentCascadeStore<KT,VT,IK,IV,ST>::PersistentCascadeStore(subgroup_id_t sid,
+                                               const CascadeWatcher<KT,VT,IK,IV>& cw):
+                                               subgroup_id(sid),
+                                               cascade_watcher(cw) {}
+
+
+template<typename KT, typename VT, KT* IK, VT* IV, persistent::StorageType ST>
+PersistentCascadeStore<KT,VT,IK,IV,ST>::PersistentCascadeStore(subgroup_id_t sid,
+                                               persistent::Persistent<DeltaCascadeStoreCore<KT,VT,IK,IV>>&&
+                                               _persistent_cascade_store,
+                                               const CascadeWatcher<KT,VT,IK,IV>& cw):
+                                               subgroup_id(sid),
+                                               persistent_cascade_store(std::move(_persistent_cascade_store)),
+                                               cascade_watcher(cw) {}
+
 
 }//namespace cascade
 }//namespace derecho

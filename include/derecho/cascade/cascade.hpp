@@ -15,6 +15,18 @@
 namespace derecho {
 namespace cascade {
     /**
+     * Watcher Type
+     * CascadeWatcher takes four arguments
+     * @param subgroup_id_t subgroup_id - subgroup id
+     * @param const uint32_t shard_num  - shard num
+     * @param const KT& key             - key
+     * @param const VT& value           - value
+     * @return void
+     */
+    template<typename KT, typename VT, KT* IK, VT* IV>
+    using CascadeWatcher = std::function<void(subgroup_id_t,const uint32_t,const KT&, const VT&)>;
+
+    /**
      * The cascade store interface.
      * @tparam KT The type of the key
      * @tparam VT The type of the value must
@@ -91,7 +103,7 @@ namespace cascade {
         /* volatile cascade store in memory */
         std::map<KT,VT> kv_map;
         /* watcher */
-        // TODO: const CascadeWatcher cascade_watcher;
+        const CascadeWatcher<KT,VT,IK,IV> cascade_watcher;
         
         REGISTER_RPC_FUNCTIONS(VolatileCascadeStore,
                                put,
@@ -120,9 +132,9 @@ namespace cascade {
         void ensure_registered(mutils::DeserializationManager&) {}
 
         /* constructors */
-        VolatileCascadeStore(subgroup_id_t sid);
-        VolatileCascadeStore(subgroup_id_t sid,const std::map<KT,VT>& _kvm); // copy kv_map
-        VolatileCascadeStore(subgroup_id_t sid,std::map<KT,VT>&& _kvm); // move kv_map
+        VolatileCascadeStore(subgroup_id_t sid,const CascadeWatcher<KT,VT,IK,IV>& cw);
+        VolatileCascadeStore(subgroup_id_t sid,const std::map<KT,VT>& _kvm, const CascadeWatcher<KT,VT,IK,IV>& cw); // copy kv_map
+        VolatileCascadeStore(subgroup_id_t sid,std::map<KT,VT>&& _kvm, const CascadeWatcher<KT,VT,IK,IV>& cw); // move kv_map
     };
 
     /**

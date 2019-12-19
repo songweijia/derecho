@@ -81,7 +81,11 @@ std::tuple<persistent::version_t,uint64_t> VolatileCascadeStore<KT,VT,IK,IV>::or
     this->kv_map.erase(value.key);
     value.ver = version;
     this->kv_map.emplace(value.key, value); // copy constructor
-    // TODO: call cascade watcher
+    if (cascade_watcher) {
+        cascade_watcher(this->subgroup_id,
+            group->template get_subgroup<VolatileCascadeStore>(this->subgroup_id).get_shard_num(),
+            value.key, value);
+    }
 
     debug_leave_func_with_value("version=0x{:x},timestamp={}",std::get<0>(version), std::get<1>(version));
 
@@ -94,7 +98,11 @@ std::tuple<persistent::version_t,uint64_t> VolatileCascadeStore<KT,VT,IK,IV>::or
 
     std::tuple<persistent::version_t,uint64_t> version = group->template get_subgroup<VolatileCascadeStore>(this->subgroup_id).get_next_version();
     if(this->kv_map.erase(key)) {
-        // TODO: call cascade watcher
+        if (cascade_watcher) {
+            cascade_watcher(this->subgroup_id,
+                group->template get_subgroup<VolatileCascadeStore>(this->subgroup_id).get_shard_num(),
+                key, *IV);
+        }
     }
 
     debug_leave_func_with_value("version=0x{:x},timestamp={}",std::get<0>(version), std::get<1>(version));
@@ -121,29 +129,36 @@ std::unique_ptr<VolatileCascadeStore<KT,VT,IK,IV>> VolatileCascadeStore<KT,VT,IK
     char const* buf) {
     auto subgroup_id_ptr = mutils::from_bytes<subgroup_id_t>(dsm,buf);
     auto kv_map_ptr = mutils::from_bytes<std::map<KT,VT>>(dsm,buf+mutils::bytes_size(*subgroup_id_ptr));
-    auto volatile_cascade_store_ptr = std::make_unique<VolatileCascadeStore>(*subgroup_id_ptr,std::move(*kv_map_ptr));
+    auto volatile_cascade_store_ptr =
+        std::make_unique<VolatileCascadeStore>(*subgroup_id_ptr,std::move(*kv_map_ptr),dsm->mgr<CascadeWatcher<KT,VT,IK,IV>>());
     return volatile_cascade_store_ptr;
 }
 
 template<typename KT, typename VT, KT* IK, VT* IV>
-VolatileCascadeStore<KT,VT,IK,IV>::VolatileCascadeStore(subgroup_id_t sid):
-    subgroup_id(sid) {
+VolatileCascadeStore<KT,VT,IK,IV>::VolatileCascadeStore(subgroup_id_t sid,
+    const CascadeWatcher<KT,VT,IK,IV>& cw):
+    subgroup_id(sid),
+    cascade_watcher(cw) {
     debug_enter_func_with_args("sid={}",sid);
     debug_leave_func();
 }
 
 template<typename KT, typename VT, KT* IK, VT* IV>
-VolatileCascadeStore<KT,VT,IK,IV>::VolatileCascadeStore(subgroup_id_t sid, const std::map<KT,VT>& _kvm):
+VolatileCascadeStore<KT,VT,IK,IV>::VolatileCascadeStore(subgroup_id_t sid,
+    const std::map<KT,VT>& _kvm, const CascadeWatcher<KT,VT,IK,IV>& cw):
     subgroup_id(sid),
-    kv_map(_kvm) {
+    kv_map(_kvm),
+    cascade_watcher(cw) {
     debug_enter_func_with_args("sid={}, copy to kv_map, size={}",sid,kv_map.size());
     debug_leave_func();
 }
 
 template<typename KT, typename VT, KT* IK, VT* IV>
-VolatileCascadeStore<KT,VT,IK,IV>::VolatileCascadeStore(subgroup_id_t sid, std::map<KT,VT>&& _kvm):
+VolatileCascadeStore<KT,VT,IK,IV>::VolatileCascadeStore(subgroup_id_t sid,
+    std::map<KT,VT>&& _kvm, const CascadeWatcher<KT,VT,IK,IV>& cw):
     subgroup_id(sid),
-    kv_map(std::move(_kvm)) {
+    kv_map(std::move(_kvm)),
+    cascade_watcher(cw) {
     debug_enter_func_with_args("sid={}, move to kv_map, size={}",sid,kv_map.size());
     debug_leave_func();
 }

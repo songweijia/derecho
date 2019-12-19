@@ -29,7 +29,20 @@ int main(int argc, char** argv) {
 
     // The factory
     auto volatile_cascade_store_factory = [](persistent::PersistentRegistry*,derecho::subgroup_id_t sid){
-        return std::make_unique<VolatileCascadeStore<uint64_t,Object,&Object::IK,&Object::IV>>(sid);
+        return std::make_unique<VolatileCascadeStore<uint64_t,Object,&Object::IK,&Object::IV>>(
+            sid,
+            [](derecho::subgroup_id_t sid,
+               const uint32_t shard_num,
+               const uint64_t& key,
+               const Object& value){
+                std::cout << "CascadeWatcher get:" << std::endl;
+                std::cout << "\tsid = " << sid << std::endl;
+                std::cout << "\tshard_num = " << shard_num << std::endl;
+                std::cout << "\tkey = " << key << std::endl;
+                std::cout << "\tvalue = " << value << std::endl;
+
+            });
+//            CascadeWatcher<uint64_t,Object,&Object::IK,&Object::IV>());
     };
     
     // The derecho group

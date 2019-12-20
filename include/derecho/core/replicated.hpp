@@ -163,6 +163,10 @@ public:
         return *user_object_ptr && true;
     }
 
+    subgroup_id_t get_subgroup_id() const {
+        return subgroup_id;
+    }
+
     /**
      * @return The shard of the Replicated<T>'s subgroup that the current node
      * belongs to, and that this Replicated<T> updates when it sends multicasts.

@@ -98,8 +98,6 @@ namespace cascade {
     public:
         /* group reference */
         using derecho::GroupReference::group;
-        /* subgroup id */
-        subgroup_id_t subgroup_id;
         /* volatile cascade store in memory */
         std::map<KT,VT> kv_map;
         /* watcher */
@@ -123,7 +121,7 @@ namespace cascade {
 
 
         // serialization support
-        DEFAULT_SERIALIZE(subgroup_id,kv_map);
+        DEFAULT_SERIALIZE(kv_map);
 
         static std::unique_ptr<VolatileCascadeStore> from_bytes(mutils::DeserializationManager* dsm, char const* buf);
 
@@ -132,9 +130,9 @@ namespace cascade {
         void ensure_registered(mutils::DeserializationManager&) {}
 
         /* constructors */
-        VolatileCascadeStore(subgroup_id_t sid,const CascadeWatcher<KT,VT,IK,IV>& cw);
-        VolatileCascadeStore(subgroup_id_t sid,const std::map<KT,VT>& _kvm, const CascadeWatcher<KT,VT,IK,IV>& cw); // copy kv_map
-        VolatileCascadeStore(subgroup_id_t sid,std::map<KT,VT>&& _kvm, const CascadeWatcher<KT,VT,IK,IV>& cw); // move kv_map
+        VolatileCascadeStore(const CascadeWatcher<KT,VT,IK,IV>& cw);
+        VolatileCascadeStore(const std::map<KT,VT>& _kvm, const CascadeWatcher<KT,VT,IK,IV>& cw); // copy kv_map
+        VolatileCascadeStore(std::map<KT,VT>&& _kvm, const CascadeWatcher<KT,VT,IK,IV>& cw); // move kv_map
     };
 
     /**
@@ -232,7 +230,6 @@ namespace cascade {
                                    public derecho::GroupReference {
     public:
         using derecho::GroupReference::group;
-        subgroup_id_t subgroup_id;
         persistent::Persistent<DeltaCascadeStoreCore<KT,VT,IK,IV>,ST> persistent_core;
         const CascadeWatcher<KT,VT,IK,IV> cascade_watcher;
         
@@ -253,7 +250,7 @@ namespace cascade {
         virtual const VT ordered_get(const KT& key) override;
 
         // serialization support
-        DEFAULT_SERIALIZE(subgroup_id,persistent_core);
+        DEFAULT_SERIALIZE(persistent_core);
 
         static std::unique_ptr<PersistentCascadeStore> from_bytes(mutils::DeserializationManager* dsm, char const* buf);
 
@@ -262,11 +259,9 @@ namespace cascade {
         void ensure_registered(mutils::DeserializationManager&) {}
 
         // constructors
-        PersistentCascadeStore(subgroup_id_t sid,
-                               persistent::PersistentRegistry *pr,
+        PersistentCascadeStore(persistent::PersistentRegistry *pr,
                                const CascadeWatcher<KT,VT,IK,IV>& cw);
-        PersistentCascadeStore(subgroup_id_t sid,
-                               persistent::Persistent<DeltaCascadeStoreCore<KT,VT,IK,IV>,ST>&& _persistent_core,
+        PersistentCascadeStore(persistent::Persistent<DeltaCascadeStoreCore<KT,VT,IK,IV>,ST>&& _persistent_core,
                                const CascadeWatcher<KT,VT,IK,IV>& cw); // move persistent_core
 
         // destructor

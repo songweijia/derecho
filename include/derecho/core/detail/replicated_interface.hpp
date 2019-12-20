@@ -14,6 +14,7 @@ class ReplicatedObject {
 public:
     virtual ~ReplicatedObject() = default;
     virtual bool is_valid() const = 0;
+    virtual subgroup_id_t get_subgroup_id() const = 0;
     virtual std::size_t object_size() const = 0;
     virtual void send_object(tcp::socket& receiver_socket) const = 0;
     virtual void send_object_raw(tcp::socket& receiver_socket) const = 0;

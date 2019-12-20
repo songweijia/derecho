@@ -36,9 +36,8 @@ int main(int argc, char** argv) {
 
     // The factory
 #ifdef PERSISTENT_CASCADE
-    auto persistent_cascade_store_factory = [](persistent::PersistentRegistry* pr,derecho::subgroup_id_t sid){
+    auto persistent_cascade_store_factory = [](persistent::PersistentRegistry* pr,derecho::subgroup_id_t){
         return std::make_unique<PersistentCascadeStore<uint64_t,Object,&Object::IK,&Object::IV,ST_FILE>>(
-            sid,
             pr,
             [](derecho::subgroup_id_t sid,
                const uint32_t shard_num,
@@ -53,9 +52,8 @@ int main(int argc, char** argv) {
             });
     };
 #else
-    auto volatile_cascade_store_factory = [](persistent::PersistentRegistry* pr,derecho::subgroup_id_t sid){
+    auto volatile_cascade_store_factory = [](persistent::PersistentRegistry* pr,derecho::subgroup_id_t){
         return std::make_unique<VolatileCascadeStore<uint64_t,Object,&Object::IK,&Object::IV>>(
-            sid,
             [](derecho::subgroup_id_t sid,
                const uint32_t shard_num,
                const uint64_t& key,

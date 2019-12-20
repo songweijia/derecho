@@ -183,8 +183,8 @@ namespace cascade {
         // 3) get(const KT& key)
         // no need to prepare a delta
         ///////////////////////////////////////////////////////////////////////////
-        virtual void finalize_current_delta(const persistent::DeltaFinalizer& df) override;
-        virtual void apply_delta(char const* const delta) override;
+        virtual void finalizeCurrentDelta(const persistent::DeltaFinalizer& df) override;
+        virtual void applyDelta(char const* const delta) override;
         static std::unique_ptr<DeltaCascadeStoreCore<KT,VT,IK,IV>> create(mutils::DeserializationManager* dm);
         /**
          * Do ordered put without generating a delta.
@@ -233,7 +233,7 @@ namespace cascade {
     public:
         using derecho::GroupReference::group;
         subgroup_id_t subgroup_id;
-        persistent::Persistent<DeltaCascadeStoreCore<KT,VT,IK,IV>,ST> persistent_cascade_store;
+        persistent::Persistent<DeltaCascadeStoreCore<KT,VT,IK,IV>,ST> persistent_core;
         const CascadeWatcher<KT,VT,IK,IV> cascade_watcher;
         
         REGISTER_RPC_FUNCTIONS(PersistentCascadeStore,
@@ -253,7 +253,7 @@ namespace cascade {
         virtual const VT ordered_get(const KT& key) override;
 
         // serialization support
-        DEFAULT_SERIALIZE(subgroup_id,persistent_cascade_store);
+        DEFAULT_SERIALIZE(subgroup_id,persistent_core);
 
         static std::unique_ptr<PersistentCascadeStore> from_bytes(mutils::DeserializationManager* dsm, char const* buf);
 
@@ -262,10 +262,12 @@ namespace cascade {
         void ensure_registered(mutils::DeserializationManager&) {}
 
         // constructors
-        PersistentCascadeStore(subgroup_id_t sid,const CascadeWatcher<KT,VT,IK,IV>& cw);
         PersistentCascadeStore(subgroup_id_t sid,
-                               persistent::Persistent<DeltaCascadeStoreCore<KT,VT,IK,IV>>&& _persistent_cascade_store,
-                               const CascadeWatcher<KT,VT,IK,IV>& cw); // move persistent_cascade_store
+                               persistent::PersistentRegistry *pr,
+                               const CascadeWatcher<KT,VT,IK,IV>& cw);
+        PersistentCascadeStore(subgroup_id_t sid,
+                               persistent::Persistent<DeltaCascadeStoreCore<KT,VT,IK,IV>,ST>&& _persistent_core,
+                               const CascadeWatcher<KT,VT,IK,IV>& cw); // move persistent_core
 
         // destructor
         virtual ~PersistentCascadeStore();

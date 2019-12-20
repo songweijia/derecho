@@ -8,6 +8,8 @@
 
 using namespace derecho::cascade;
 
+#define PERSISTENT_CASCADE
+
 int main(int argc, char** argv) {
     /** initialize the parameters
      */
@@ -22,34 +24,66 @@ int main(int argc, char** argv) {
     // The subgroup info structure
     derecho::SubgroupInfo si {
         derecho::DefaultSubgroupAllocator({
+#ifdef PERSISTENT_CASCADE
+            {std::type_index(typeid(PersistentCascadeStore<uint64_t,Object,&Object::IK,&Object::IV,ST_FILE>)),
+             derecho::one_subgroup_policy(derecho::flexible_even_shards("PERSISTENT_CASCADE_STORE"))}
+#else
             {std::type_index(typeid(VolatileCascadeStore<uint64_t,Object,&Object::IK,&Object::IV>)),
              derecho::one_subgroup_policy(derecho::flexible_even_shards("VOLATILE_CASCADE_STORE"))}
+#endif//PERSISTENT_CASCADE
         })
     };
 
     // The factory
-    auto volatile_cascade_store_factory = [](persistent::PersistentRegistry*,derecho::subgroup_id_t sid){
-        return std::make_unique<VolatileCascadeStore<uint64_t,Object,&Object::IK,&Object::IV>>(
+#ifdef PERSISTENT_CASCADE
+    auto persistent_cascade_store_factory = [](persistent::PersistentRegistry* pr,derecho::subgroup_id_t sid){
+        return std::make_unique<PersistentCascadeStore<uint64_t,Object,&Object::IK,&Object::IV,ST_FILE>>(
             sid,
+            pr,
             [](derecho::subgroup_id_t sid,
                const uint32_t shard_num,
                const uint64_t& key,
                const Object& value){
-                std::cout << "CascadeWatcher get:" << std::endl;
+                std::cout << "Persistent CascadeWatcher get:" << std::endl;
                 std::cout << "\tsid = " << sid << std::endl;
                 std::cout << "\tshard_num = " << shard_num << std::endl;
                 std::cout << "\tkey = " << key << std::endl;
                 std::cout << "\tvalue = " << value << std::endl;
 
             });
-//            CascadeWatcher<uint64_t,Object,&Object::IK,&Object::IV>());
     };
+#else
+    auto volatile_cascade_store_factory = [](persistent::PersistentRegistry* pr,derecho::subgroup_id_t sid){
+        return std::make_unique<VolatileCascadeStore<uint64_t,Object,&Object::IK,&Object::IV>>(
+            sid,
+            [](derecho::subgroup_id_t sid,
+               const uint32_t shard_num,
+               const uint64_t& key,
+               const Object& value){
+                std::cout << "Volatile CascadeWatcher get:" << std::endl;
+                std::cout << "\tsid = " << sid << std::endl;
+                std::cout << "\tshard_num = " << shard_num << std::endl;
+                std::cout << "\tkey = " << key << std::endl;
+                std::cout << "\tvalue = " << value << std::endl;
+
+            });
+    };
+#endif//PERSISTENT_CASCADE
     
     // The derecho group
-    derecho::Group<VolatileCascadeStore<uint64_t,Object,&Object::IK,&Object::IV>> 
+#ifdef PERSISTENT_CASCADE
+    derecho::Group<PersistentCascadeStore<uint64_t,Object,&Object::IK,&Object::IV,ST_FILE>>
+#else
+    derecho::Group<VolatileCascadeStore<uint64_t,Object,&Object::IK,&Object::IV>>
+#endif//PERSISTENT_CASCADE
         group(callback_set,si,nullptr,//TODO: use deserialization manager here.
               std::vector<derecho::view_upcall_t>{},
-              volatile_cascade_store_factory);
+#ifdef PERSISTENT_CASCADE
+              persistent_cascade_store_factory
+#else
+              volatile_cascade_store_factory
+#endif//PERSISTENT_CASCADE
+        );
     std::cout << "Finished constructing Derecho group." << std::endl;
 
     std::string odata("cascade test message - ");
@@ -60,7 +94,11 @@ int main(int argc, char** argv) {
     odata += random();
     Object o(my_rank,odata.c_str(), odata.length() + 1);
 
+#ifdef PERSISTENT_CASCADE
+    auto& handle = group.template get_subgroup<PersistentCascadeStore<uint64_t,Object,&Object::IK,&Object::IV,ST_FILE>>(0);
+#else
     auto& handle = group.template get_subgroup<VolatileCascadeStore<uint64_t,Object,&Object::IK,&Object::IV>>(0);
+#endif
 
     derecho::rpc::QueryResults<std::tuple<persistent::version_t,uint64_t>> results = handle.template p2p_send<RPC_NAME(put)>(group.get_my_id(),o);
     decltype(results)::ReplyMap& replies = results.get();

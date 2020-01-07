@@ -58,6 +58,9 @@ if (NOT ${libfabric_FOUND})
     message(FATAL_ERROR "libfabric not found. Please install from https://github.com/ofiwg/libfabric.git. [commit:fcf0f2ec3c7109e06e09d3650564df8d2dfa12b6]")
 endif()
 
+# openssl_FOUND
+find_package(OpenSSL REQUIRED)
+
 add_subdirectory(src/mutils-serialization)
 add_subdirectory(src/conf)
 add_subdirectory(src/utils)
@@ -82,7 +85,8 @@ target_link_libraries(derecho
     stdc++fs ${libfabric_LIBRARIES} 
     ${mutils_LIBRARIES} 
     ${mutils-containers_LIBRARIES}
-    ${mutils-tasks_LIBRARIES})
+    ${mutils-tasks_LIBRARIES}
+    ${OPENSSL_LIBRARIES})
 set_target_properties(derecho PROPERTIES
     SOVERSION ${derecho_VERSION}
     VERSION ${derecho_build_VERSION}

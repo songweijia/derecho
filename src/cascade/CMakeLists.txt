@@ -12,6 +12,9 @@ set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -O0 -ggdb -gdwarf-3 -D_DEBUG
 set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}")
 set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO} -ggdb -gdwarf-3 -D_DEBUG -D_PERFORMANCE_DEBUG")
 
+# cascade object
+add_library(cascade OBJECT object.cpp)
+
 # objectstore tester
 add_executable(sample_cascade_store sample_cascade_store.cpp object.cpp)
 target_include_directories(sample_cascade_store PRIVATE

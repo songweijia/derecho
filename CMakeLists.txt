@@ -79,7 +79,8 @@ add_library(derecho SHARED
     $<TARGET_OBJECTS:rdmc>
     $<TARGET_OBJECTS:sst>
     $<TARGET_OBJECTS:tcp>
-    $<TARGET_OBJECTS:persistent>)
+    $<TARGET_OBJECTS:persistent>
+    $<TARGET_OBJECTS:cascade>)
 target_link_libraries(derecho
     rdmacm ibverbs rt pthread atomic
     stdc++fs ${libfabric_LIBRARIES} 
@@ -107,6 +108,7 @@ install(DIRECTORY
         include/derecho/sst
         include/derecho/tcp
         include/derecho/utils
+        include/derecho/cascade # TODO: separate cascade from derecho core?
         DESTINATION include/derecho)
 
 include(CMakePackageConfigHelpers)

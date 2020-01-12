@@ -10,7 +10,9 @@ Blob::Blob(const char* const b, const decltype(size) s) :
     bytes(nullptr), size(0) {
     if(s > 0) {
         bytes = new char[s];
-        memcpy(bytes, b, s);
+        if (bytes != nullptr) {
+            memcpy(bytes, b, s);
+        }
         size = s;
     }
 }

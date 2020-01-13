@@ -83,7 +83,7 @@ std::tuple<persistent::version_t,uint64_t> VolatileCascadeStore<KT,VT,IK,IV>::or
     this->kv_map.emplace(value.key, value); // copy constructor
     if (cascade_watcher) {
         cascade_watcher(
-            group->template get_subgroup<VolatileCascadeStore>(this->subgroup_index).get_subgroupd_id(),
+            group->template get_subgroup<VolatileCascadeStore>(this->subgroup_index).get_subgroup_id(),
             group->template get_subgroup<VolatileCascadeStore>(this->subgroup_index).get_shard_num(),
             value.key, value);
     }

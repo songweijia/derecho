@@ -35,7 +35,7 @@ Blob::Blob(Blob&& other) :
 Blob::Blob() : bytes(nullptr), size(0) {}
 
 Blob::~Blob() {
-    if(bytes) delete bytes;
+    if(bytes) delete [] bytes;
 }
 
 Blob& Blob::operator=(Blob&& other) {

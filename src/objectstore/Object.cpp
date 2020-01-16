@@ -44,7 +44,7 @@ namespace objectstore{
 
     Blob& Blob::operator=(const Blob& other) {
         if(bytes != nullptr) {
-            delete bytes;
+            delete [] bytes;
         }
         size = other.size;
         if(size > 0) {

@@ -14,6 +14,10 @@ set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO} -ggdb -gdw
 
 # cascade object
 add_library(cascade OBJECT object.cpp)
+target_include_directories(cascade PRIVATE
+    $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_DIR}>
+)
 
 # objectstore tester
 add_executable(sample_cascade_store sample_cascade_store.cpp object.cpp)

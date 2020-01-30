@@ -12,6 +12,8 @@ Blob::Blob(const char* const b, const decltype(size) s) :
         bytes = new char[s];
         if (b != nullptr) {
             memcpy(bytes, b, s);
+        } else {
+            bzero(bytes, s);
         }
         size = s;
     }

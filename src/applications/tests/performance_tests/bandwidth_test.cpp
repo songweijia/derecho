@@ -197,4 +197,13 @@ int main(int argc, char* argv[]) {
 
     group.barrier_sync();
     group.leave();
+    MulticastGroup::TimedNode initNode = group.getInitTimedNode();
+    std::ofstream fs("bandwidth.out",std::ios_base::trunc | std::ios_base::out);
+    if (initNode.observation != '\0') {
+	MulticastGroup::TimedNode* node = initNode.next;
+    	while (node->observation != '\0') {
+	    	fs << node->observation << "," << node->time << "\n";
+	    	node = node->next;
+	}
+    }
 }

@@ -444,7 +444,27 @@ private:
     /* Get a pointer into the current buffer, to write data into it before sending
      * Now this is a private function, called by send internally */
     char* get_sendbuffer_ptr(subgroup_id_t subgroup_num, long long unsigned int payload_size, bool cooked_send);
-
+      //  struct TimedNode {
+       //    char observation ='\0';
+        //   int time;
+         //  struct TimedNode* next;
+   // };
+/*
+    TimedNode initTimedNode;
+    TimedNode currTimedNode;
+    void addTimedNode(char observation) {
+	    TimedNode node;
+	    node.observation = observation;
+	    node.time = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+	    if (currTimedNode.observation != '\0') {
+	    	currTimedNode.next = &node;
+	    	currTimedNode = node;
+	    } else {
+		initTimedNode = node;
+		currTimedNode = node;
+	    }
+    }
+*/
 public:
     /**
      * Standard constructor for setting up a MulticastGroup for the first time.
@@ -488,6 +508,27 @@ public:
             std::vector<char> already_failed = {});
 
     ~MulticastGroup();
+
+     struct TimedNode {
+           char observation ='\0';
+           int time;
+           struct TimedNode* next;
+    };
+    TimedNode initTimedNode;
+    TimedNode currTimedNode;
+    TimedNode getInitTimedNode() { return initTimedNode;};
+    void addTimedNode(char observation) {
+            TimedNode node;
+            node.observation = observation;
+            node.time = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+            if (currTimedNode.observation != '\0') {
+                currTimedNode.next = &node;
+                currTimedNode = node;
+            } else {
+                initTimedNode = node;
+                currTimedNode = node;
+            }
+    }
 
     /**
      * Registers a function to be called upon receipt of a multicast RPC message

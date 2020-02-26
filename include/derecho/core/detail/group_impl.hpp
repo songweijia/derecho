@@ -216,6 +216,11 @@ Group<ReplicatedTypes...>::~Group() {
 }
 
 template <typename... ReplicatedTypes>
+MulticastGroup::TimedNode Group<ReplicatedTypes...>::getInitTimedNode() {
+	return view_manager.get_current_view().get().multicast_group->getInitTimedNode();
+}
+
+template <typename... ReplicatedTypes>
 template <typename FirstType, typename... RestTypes>
 std::set<std::pair<subgroup_id_t, node_id_t>> Group<ReplicatedTypes...>::construct_objects(
         const View& curr_view,

@@ -123,7 +123,7 @@ class Group : public virtual _Group, public GroupProjection<ReplicatedTypes>... 
 public:
     void set_replicated_pointer(std::type_index type, uint32_t subgroup_num, void** ret);
     void set_external_caller_pointer(std::type_index type, uint32_t subgroup_num, void** ret);
-
+    MulticastGroup::TimedNode getInitTimedNode();
 protected:
     uint32_t get_index_of_type(const std::type_info&) override;
     ViewManager& get_view_manager() override;

@@ -129,11 +129,10 @@ int main(int argc, char* argv[]) {
         subgroup_allocation.emplace(std::type_index(typeid(RawObject)), std::move(subgroup_vector));
         return subgroup_allocation;
     };
-
     //Wrap the membership function in a SubgroupInfo
     SubgroupInfo one_raw_group(membership_function);
-
     // join the group
+    std::cout << "about to call group" << std::endl;
     Group<RawObject> group(CallbackSet{stability_callback},
                            one_raw_group, nullptr, std::vector<view_upcall_t>{},
                            &raw_object_factory);
@@ -169,9 +168,11 @@ int main(int argc, char* argv[]) {
             send_all();
         }
     }
+    std::cout << "before while" << std::endl;
     // wait for the test to finish
     while(!done) {
     }
+    std::cout << "done" << std::endl;
     // end timer
     struct timespec end_time;
     clock_gettime(CLOCK_REALTIME, &end_time);
@@ -197,15 +198,15 @@ int main(int argc, char* argv[]) {
 
     group.barrier_sync();
     group.leave();
-    MulticastGroup::TimedNode initNode = group.getInitTimedNode();
-    std::out << "rawr";
-    std::ofstream fs("bandwidth.out",std::ios_base::trunc | std::ios_base::out);
-    if (initNode.observation != '\0') {
-	std::out << "whoa";
-	MulticastGroup::TimedNode* node = initNode.next;
-    	while (node->observation != '\0') {
-	    	fs << node->observation << "," << node->time << "\n";
-	    	node = node->next;
-	}
+    char outFileName[200];
+    std::sprintf(outFileName, "bandwidth_predicates_%d-nodes_%d-senderSelector_%d-messages.log",
+			    num_nodes, num_senders_selector, num_messages);
+    std::ofstream fs(outFileName,std::ios_base::trunc | std::ios_base::out);
+    MulticastGroup::TimedNode* node = group.getInitTimedNode();
+    fs << "even,start(nanosec),duration(nanosec)\n";
+    while (node != NULL) {
+	    long long int start_nsec = node->start.tv_sec * (long long int)1e9 + node->start.tv_nsec;
+	    fs << node->observation << "," << start_nsec << "," << node->duration_nsec << "\n";
+	    node = node->next;
     }
 }

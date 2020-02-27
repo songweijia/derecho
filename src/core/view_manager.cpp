@@ -79,8 +79,12 @@ ViewManager::ViewManager(
                 std::vector<char>{0},
                 std::vector<node_id_t>{}, std::vector<node_id_t>{},
                 0, 0, subgroup_type_order);
+	std::cout << "seeee\n";
+	std::cout << my_id << std::endl;
         await_first_view(my_id);
+	std::cout << "meeee\n";
         setup_initial_tcp_connections(*curr_view, my_id);
+	std::cout << "kneeee\n";
     }
 }
 
@@ -420,15 +424,21 @@ void ViewManager::await_first_view(const node_id_t my_id) {
     std::set<node_id_t> members_sent_view;
     curr_view->is_adequately_provisioned = false;
     bool joiner_failed = false;
+    std::cout << "a\n";
     do {
+	    std::cout << "aa\n";
         while(!curr_view->is_adequately_provisioned) {
+		std::cout << "i\n";
             tcp::socket client_socket = server_socket.accept();
+	    std::cout << "j\n";
             uint64_t joiner_version_code;
+	    std::cout << "b\n";
             client_socket.exchange(my_version_hashcode, joiner_version_code);
             if(joiner_version_code != my_version_hashcode) {
                 rls_default_warn("Rejected a connection from client at {}. Client was running on an incompatible platform or used an incompatible compiler.", client_socket.get_remote_ip());
                 continue;
             }
+	    std::cout << "f\n";
             node_id_t joiner_id = 0;
             client_socket.read(joiner_id);
             if(curr_view->rank_of(joiner_id) != -1) {
@@ -448,6 +458,7 @@ void ViewManager::await_first_view(const node_id_t my_id) {
             ip_addr_t my_ip = client_socket.get_self_ip();
             //Construct a new view by appending this joiner to the previous view
             //None of these views are ever installed, so we don't use curr_view/next_view like normal
+	    std::cout << "o\n";
             curr_view = std::make_unique<View>(curr_view->vid,
                                                functional_append(curr_view->members, joiner_id),
                                                functional_append(curr_view->member_ips_and_ports,
@@ -456,13 +467,17 @@ void ViewManager::await_first_view(const node_id_t my_id) {
                                                functional_append(curr_view->joined, joiner_id),
                                                std::vector<node_id_t>{}, 0, 0,
                                                subgroup_type_order);
+	    std::cout << "p\n";
             make_subgroup_maps(subgroup_info, std::unique_ptr<View>(), *curr_view);
+	    std::cout << "q\n";
             waiting_join_sockets.emplace(joiner_id, std::move(client_socket));
             dbg_default_debug("Node {} connected from IP address {} and GMS port {}", joiner_id, joiner_ip, joiner_gms_port);
         }
+	std::cout << "w\n";
         joiner_failed = false;
         for(auto waiting_sockets_iter = waiting_join_sockets.begin();
             waiting_sockets_iter != waiting_join_sockets.end();) {
+		std::cout << "x\n";
             std::size_t view_buffer_size = mutils::bytes_size(*curr_view);
             char view_buffer[view_buffer_size];
             bool send_success;
@@ -511,7 +526,7 @@ void ViewManager::await_first_view(const node_id_t my_id) {
                 break;
             }
         }  //for (waiting_join_sockets)
-
+std::cout << "y\n";
         if(joiner_failed) {
             for(const node_id_t& member_sent_view : members_sent_view) {
                 dbg_default_debug("Sending view abort message to node {}", member_sent_view);
@@ -520,7 +535,7 @@ void ViewManager::await_first_view(const node_id_t my_id) {
             members_sent_view.clear();
         }
     } while(joiner_failed);
-
+	std::cout << "z\n";
     dbg_default_trace("Decided on initial view: {}", curr_view->debug_string());
     //At this point, we have successfully sent an initial view to all joining nodes, so we can commit it
     //There's no state-transfer step to do, so we don't have to wait for state transfer to complete

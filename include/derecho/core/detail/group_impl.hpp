@@ -125,7 +125,7 @@ Group<ReplicatedTypes...>::Group(const CallbackSet& callbacks,
           is_starting_leader((getConfString(CONF_DERECHO_LOCAL_IP) == getConfString(CONF_DERECHO_LEADER_IP))
                              && (getConfUInt16(CONF_DERECHO_GMS_PORT) == getConfUInt16(CONF_DERECHO_LEADER_GMS_PORT))),
           leader_connection([&]() -> std::optional<tcp::socket> {
-              if(!is_starting_leader) {
+			  if(!is_starting_leader) {
                   return tcp::socket{getConfString(CONF_DERECHO_LEADER_IP), getConfUInt16(CONF_DERECHO_LEADER_GMS_PORT)};
               }
               return std::nullopt;
@@ -163,6 +163,7 @@ Group<ReplicatedTypes...>::Group(const CallbackSet& callbacks,
         const vector_int64_2d& old_shard_leaders = view_manager.get_old_shard_leaders();
         //As a side effect, construct_objects filters old_shard_leaders to just the leaders
         //this node needs to receive object state from
+	std::cout << "wyp\n";
         std::set<std::pair<subgroup_id_t, node_id_t>> subgroups_and_leaders_to_receive
                 = construct_objects<ReplicatedTypes...>(view_manager.get_current_or_restart_view().get(),
                                                         old_shard_leaders);
@@ -216,7 +217,7 @@ Group<ReplicatedTypes...>::~Group() {
 }
 
 template <typename... ReplicatedTypes>
-MulticastGroup::TimedNode Group<ReplicatedTypes...>::getInitTimedNode() {
+MulticastGroup::TimedNode* Group<ReplicatedTypes...>::getInitTimedNode() {
 	return view_manager.get_current_view().get().multicast_group->getInitTimedNode();
 }
 

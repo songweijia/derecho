@@ -624,7 +624,8 @@ int32_t MulticastGroup::resolve_num_received(int32_t index, uint32_t num_receive
 bool MulticastGroup::receiver_predicate(const SubgroupSettings& subgroup_settings,
                                         const std::map<uint32_t, uint32_t>& shard_ranks_by_sender_rank,
                                         uint32_t num_shard_senders, const DerechoSST& sst) {
-MulticastGroup::addTimedNode('r');
+	struct timespec timedNodeStart;
+        clock_gettime(CLOCK_REALTIME, &timedNodeStart);
 
 for(uint sender_count = 0; sender_count < num_shard_senders; ++sender_count) {
         int32_t num_received = sst.num_received_sst[member_index][subgroup_settings.num_received_offset + sender_count] + 1;
@@ -635,6 +636,7 @@ for(uint sender_count = 0; sender_count < num_shard_senders; ++sender_count) {
             return true;
         }
     }
+MulticastGroup::addTimedNode('r', timedNodeStart);
     return false;
 }
 
@@ -753,7 +755,6 @@ void MulticastGroup::receiver_function(subgroup_id_t subgroup_num, const Subgrou
 
 void MulticastGroup::delivery_trigger(subgroup_id_t subgroup_num, const SubgroupSettings& subgroup_settings,
                                       const uint32_t num_shard_members, DerechoSST& sst) {
-	MulticastGroup::addTimedNode('D');
 
     std::lock_guard<std::recursive_mutex> lock(msg_state_mtx);
     // compute the min of the seq_num
@@ -851,18 +852,21 @@ void MulticastGroup::register_predicates() {
         };
         auto receiver_trig = [this, subgroup_num, subgroup_settings, shard_ranks_by_sender_rank,
                               num_shard_senders, batch_size, sst_receive_handler_lambda](DerechoSST& sst) mutable {
-				      MulticastGroup::addTimedNode('R');
+		struct timespec timedNodeStart;
+                clock_gettime(CLOCK_REALTIME, &timedNodeStart);
         
     receiver_function(subgroup_num, subgroup_settings,
                               shard_ranks_by_sender_rank, num_shard_senders, sst,
                               batch_size, sst_receive_handler_lambda);
+	MulticastGroup::addTimedNode('R', timedNodeStart);
         };
         receiver_pred_handles.emplace_back(sst->predicates.insert(receiver_pred, receiver_trig,
-                                                                  sst::PredicateType::RECURRENT));
+                                                                 sst::PredicateType::RECURRENT));
 
         if(subgroup_settings.mode != Mode::UNORDERED) {
             auto delivery_pred = [this, subgroup_num, subgroup_settings, num_shard_members](const DerechoSST& sst) {
-	MulticastGroup::addTimedNode('d');
+		struct timespec timedNodeStart;
+                clock_gettime(CLOCK_REALTIME, &timedNodeStart);
                 std::lock_guard<std::recursive_mutex> lock(msg_state_mtx);
                 // compute the min of the seq_num
                 message_id_t min_stable_num
@@ -873,10 +877,15 @@ void MulticastGroup::register_predicates() {
                     min_stable_num = std::min(min_stable_num, stable_num_copy);
                 }
 
+				MulticastGroup::addTimedNode('d', timedNodeStart);
+
 		return min_stable_num > sst.delivered_num[member_index][subgroup_num];
             };
             auto delivery_trig = [this, subgroup_num, subgroup_settings, num_shard_members](DerechoSST& sst) mutable {
+		struct timespec timedNodeStart;
+		clock_gettime(CLOCK_REALTIME, &timedNodeStart);
                 delivery_trigger(subgroup_num, subgroup_settings, num_shard_members, sst);
+		MulticastGroup::addTimedNode('D', timedNodeStart);
             };
 
             delivery_pred_handles.emplace_back(sst->predicates.insert(delivery_pred, delivery_trig,
@@ -884,8 +893,8 @@ void MulticastGroup::register_predicates() {
 
             auto persistence_pred = [this, subgroup_num, subgroup_settings, num_shard_members,
                                      version_seen = (persistent::version_t)INVALID_VERSION](const DerechoSST& sst) {
-            MulticastGroup::addTimedNode('p');
-		
+	    	struct timespec timedNodeStart;
+                clock_gettime(CLOCK_REALTIME, &timedNodeStart);	
 	    std::lock_guard<std::recursive_mutex> lock(msg_state_mtx);
                 // compute the min of the persisted_num
                 persistent::version_t min_persisted_num
@@ -894,12 +903,13 @@ void MulticastGroup::register_predicates() {
                     persistent::version_t persisted_num_copy = sst.persisted_num[node_id_to_sst_index.at(subgroup_settings.members[i])][subgroup_num];
                     min_persisted_num = std::min(min_persisted_num, persisted_num_copy);
                 }
+		MulticastGroup::addTimedNode('p', timedNodeStart);
                 return (version_seen < min_persisted_num) && callbacks.global_persistence_callback;
             };
             auto persistence_trig = [this, subgroup_num, subgroup_settings, num_shard_members,
                                      version_seen = (persistent::version_t)INVALID_VERSION](DerechoSST& sst) mutable {
-	MulticastGroup::addTimedNode('P');
-
+		struct timespec timedNodeStart;
+                clock_gettime(CLOCK_REALTIME, &timedNodeStart);
                 std::lock_guard<std::recursive_mutex> lock(msg_state_mtx);
                 // compute the min of the persisted_num
                 persistent::version_t min_persisted_num
@@ -913,29 +923,33 @@ void MulticastGroup::register_predicates() {
                     callbacks.global_persistence_callback(subgroup_num, min_persisted_num);
                     version_seen = min_persisted_num;
                 }
+				MulticastGroup::addTimedNode('P', timedNodeStart);
             };
 
             persistence_pred_handles.emplace_back(sst->predicates.insert(persistence_pred, persistence_trig, sst::PredicateType::RECURRENT));
 
             if(subgroup_settings.sender_rank >= 0) {
                 auto sender_pred = [this, subgroup_num, subgroup_settings, num_shard_members, num_shard_senders](const DerechoSST& sst) {
-
-    MulticastGroup::addTimedNode('s');
+		struct timespec timedNodeStart;
+                clock_gettime(CLOCK_REALTIME, &timedNodeStart);
                     message_id_t seq_num = next_message_to_deliver[subgroup_num] * num_shard_senders + subgroup_settings.sender_rank;
                     for(uint i = 0; i < num_shard_members; ++i) {
                         if(sst.delivered_num[node_id_to_sst_index.at(subgroup_settings.members[i])][subgroup_num] < seq_num
                            || (sst.persisted_num[node_id_to_sst_index.at(subgroup_settings.members[i])][subgroup_num] < seq_num)) {
-                            return false;
+                            MulticastGroup::addTimedNode('s', timedNodeStart);
+								return false;
                         }
                     }
+					MulticastGroup::addTimedNode('s', timedNodeStart);
                     return true;
                 };
                 auto sender_trig = [this, subgroup_num](DerechoSST& sst) {
-MulticastGroup::addTimedNode('S');
-
+			struct timespec timedNodeStart;
+                	clock_gettime(CLOCK_REALTIME, &timedNodeStart);
 			sender_cv.notify_all();
-                    next_message_to_deliver[subgroup_num]++;
-                };
+                    	next_message_to_deliver[subgroup_num]++;
+                	MulticastGroup::addTimedNode('S', timedNodeStart);
+				};
                 sender_pred_handles.emplace_back(sst->predicates.insert(sender_pred, sender_trig,
                                                                         sst::PredicateType::RECURRENT));
             }
@@ -943,21 +957,24 @@ MulticastGroup::addTimedNode('S');
             //This subgroup is in UNORDERED mode
             if(subgroup_settings.sender_rank >= 0) {
 		    auto sender_pred = [this, subgroup_num, subgroup_settings, num_shard_members](const DerechoSST& sst) {
-MulticastGroup::addTimedNode('s');
-
+		    struct timespec timedNodeStart;
+		    clock_gettime(CLOCK_REALTIME, &timedNodeStart);
                     for(uint i = 0; i < num_shard_members; ++i) {
                         uint32_t num_received_offset = subgroup_settings.num_received_offset;
                         if(sst.num_received[node_id_to_sst_index.at(subgroup_settings.members[i])][num_received_offset + subgroup_settings.sender_rank]
                            < static_cast<int32_t>(future_message_indices[subgroup_num] - 1 - subgroup_settings.profile.window_size)) {
-                            return false;
+                            MulticastGroup::addTimedNode('s', timedNodeStart);
+								return false;
                         }
                     }
+					MulticastGroup::addTimedNode('s', timedNodeStart);
                     return true;
                 };
                 auto sender_trig = [this](DerechoSST& sst) {
-MulticastGroup::addTimedNode('S');
-
+			struct timespec timedNodeStart;
+                	clock_gettime(CLOCK_REALTIME, &timedNodeStart);
                     sender_cv.notify_all();
+			MulticastGroup::addTimedNode('S', timedNodeStart);
                 };
                 sender_pred_handles.emplace_back(sst->predicates.insert(sender_pred, sender_trig,
                                                                         sst::PredicateType::RECURRENT));

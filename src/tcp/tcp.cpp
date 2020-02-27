@@ -234,23 +234,31 @@ connection_listener::connection_listener(uint16_t port) {
 }
 
 socket connection_listener::accept() {
-    char client_ip_cstr[INET6_ADDRSTRLEN + 1];
+	char client_ip_cstr[INET6_ADDRSTRLEN + 1];
     struct sockaddr_storage client_addr_info;
     socklen_t len = sizeof client_addr_info;
-
+    std::cout << "tcp.cpp a\n";
+    std::cout << *fd << std::endl;
+     //std::cout << client_addr_info << std::endl;
+std::cout << len << std::endl;
     int sock = ::accept(*fd, (struct sockaddr *)&client_addr_info, &len);
-    if(sock < 0) throw connection_failure();
+    std::cout << "tcp.cpp b\n";
+if(sock < 0) throw connection_failure();
+std::cout << "tcp.cpp c\n";
 
     if(client_addr_info.ss_family == AF_INET) {
         // Client has an IPv4 address
+std::cout << "tcp.cpp d\n";
         struct sockaddr_in *s = (struct sockaddr_in *)&client_addr_info;
         inet_ntop(AF_INET, &s->sin_addr, client_ip_cstr, sizeof client_ip_cstr);
     } else {  // AF_INET6
         // Client has an IPv6 address
+std::cout << "tcp.cpp e\n";
         struct sockaddr_in6 *s = (struct sockaddr_in6 *)&client_addr_info;
         inet_ntop(AF_INET6, &s->sin6_addr, client_ip_cstr,
                   sizeof client_ip_cstr);
     }
+std::cout << "tcp.cpp a\n";
 
     return socket(sock, std::string(client_ip_cstr));
 }

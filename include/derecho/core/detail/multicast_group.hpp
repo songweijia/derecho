@@ -499,7 +499,7 @@ public:
     TimedNode* currTimedNode = NULL;
     TimedNode* getInitTimedNode() { return initTimedNode; };
     void addTimedNode(char observation, timespec startTime) {
-	    std::cout << "0" << std::endl;
+	    std::cout << "adding timed node with observation " << "'" << observation << "'" << std::endl;
 	    struct timespec endTime;
 	    clock_gettime(CLOCK_REALTIME, &endTime);
 		    //std::chrono::time_point<std::chrono::system_clock> startTime, std::chrono::time_point<std::chrono::system_clock> endTime) {

@@ -163,7 +163,6 @@ Group<ReplicatedTypes...>::Group(const CallbackSet& callbacks,
         const vector_int64_2d& old_shard_leaders = view_manager.get_old_shard_leaders();
         //As a side effect, construct_objects filters old_shard_leaders to just the leaders
         //this node needs to receive object state from
-	std::cout << "wyp\n";
         std::set<std::pair<subgroup_id_t, node_id_t>> subgroups_and_leaders_to_receive
                 = construct_objects<ReplicatedTypes...>(view_manager.get_current_or_restart_view().get(),
                                                         old_shard_leaders);

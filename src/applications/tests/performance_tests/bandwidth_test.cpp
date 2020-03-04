@@ -85,7 +85,6 @@ int main(int argc, char* argv[]) {
             }
         }
     };
-
     Mode mode = Mode::ORDERED;
     if(delivery_mode) {
         mode = Mode::UNORDERED;
@@ -132,11 +131,9 @@ int main(int argc, char* argv[]) {
     //Wrap the membership function in a SubgroupInfo
     SubgroupInfo one_raw_group(membership_function);
     // join the group
-    std::cout << "about to call group" << std::endl;
     Group<RawObject> group(CallbackSet{stability_callback},
                            one_raw_group, nullptr, std::vector<view_upcall_t>{},
                            &raw_object_factory);
-
     cout << "Finished constructing/joining Group" << endl;
     auto members_order = group.get_members();
     uint32_t node_rank = group.get_my_rank();
@@ -168,11 +165,9 @@ int main(int argc, char* argv[]) {
             send_all();
         }
     }
-    std::cout << "before while" << std::endl;
     // wait for the test to finish
     while(!done) {
     }
-    std::cout << "done" << std::endl;
     // end timer
     struct timespec end_time;
     clock_gettime(CLOCK_REALTIME, &end_time);

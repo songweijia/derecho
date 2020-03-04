@@ -433,9 +433,7 @@ void ViewManager::await_first_view(const node_id_t my_id) {
     bool joiner_failed = false;
     do {
         while(!curr_view->is_adequately_provisioned) {
-	    std::cout << "about to call server_socket.accept()\n";
             tcp::socket client_socket = server_socket.accept();
-	    std::cout << "done with server_socket.accept()\n";
             uint64_t joiner_version_code;
             client_socket.exchange(my_version_hashcode, joiner_version_code);
             if(joiner_version_code != my_version_hashcode) {

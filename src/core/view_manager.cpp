@@ -657,44 +657,101 @@ void ViewManager::register_predicates() {
     /* Note that each trigger function must be wrapped in a lambda because it's
      * a member function, and lambdas are the only way to bind "this" to a member
      * function invocation. */
-
     auto leader_suspected_changed = [this](const DerechoSST& sst) {
-        return active_leader && suspected_not_equal(sst, last_suspected);
+	struct timespec timedNodeStart;
+	clock_gettime(CLOCK_REALTIME, &timedNodeStart);	
+	bool res = active_leader && suspected_not_equal(sst, last_suspected);
+	curr_view->multicast_group->addTimedNode('a', timedNodeStart);
+        return res;
     };
     auto nonleader_suspected_changed = [this](const DerechoSST& sst) {
-        return !active_leader && suspected_not_equal(sst, last_suspected);
+	struct timespec timedNodeStart;
+        clock_gettime(CLOCK_REALTIME, &timedNodeStart);
+        bool res = !active_leader && suspected_not_equal(sst, last_suspected);
+        curr_view->multicast_group->addTimedNode('b', timedNodeStart);
+        return res;
     };
-    auto new_suspicion_trig = [this](DerechoSST& sst) { new_suspicion(sst); };
+    auto new_suspicion_trig = [this](DerechoSST& sst) { 
+	struct timespec timedNodeStart;
+        clock_gettime(CLOCK_REALTIME, &timedNodeStart);
+        new_suspicion(sst);
+	curr_view->multicast_group->addTimedNode('B', timedNodeStart);	    
+    };
 
     auto start_join_pred = [this](const DerechoSST& sst) {
-        return active_leader && has_pending_join();
+	struct timespec timedNodeStart;
+        clock_gettime(CLOCK_REALTIME, &timedNodeStart);
+        bool res = active_leader && has_pending_join();
+        curr_view->multicast_group->addTimedNode('c', timedNodeStart);
+        return res;
     };
-    auto propose_changes_trig = [this](DerechoSST& sst) { propose_changes(sst); };
+    auto propose_changes_trig = [this](DerechoSST& sst) { 
+	struct timespec timedNodeStart;
+        clock_gettime(CLOCK_REALTIME, &timedNodeStart);
+        propose_changes(sst);
+        curr_view->multicast_group->addTimedNode('A', timedNodeStart);   
+    };
 
     auto new_sockets_pred = [this](const DerechoSST& sst) {
-        return has_pending_new();
+	struct timespec timedNodeStart;
+        clock_gettime(CLOCK_REALTIME, &timedNodeStart);
+        bool res = has_pending_new();
+        curr_view->multicast_group->addTimedNode('d', timedNodeStart);
+        return res;
     };
-    auto new_sockets = [this](DerechoSST& sst) { process_new_sockets(); };
+    auto new_sockets = [this](DerechoSST& sst) { 
+	struct timespec timedNodeStart;
+        clock_gettime(CLOCK_REALTIME, &timedNodeStart);
+        process_new_sockets();
+        curr_view->multicast_group->addTimedNode('D', timedNodeStart);
+    };
 
     auto change_commit_ready = [this](const DerechoSST& gmsSST) {
-        return active_leader
+	struct timespec timedNodeStart;
+        clock_gettime(CLOCK_REALTIME, &timedNodeStart);
+        bool res = active_leader
                && min_acked(gmsSST, curr_view->failed) > gmsSST.num_committed[curr_view->my_rank];
+        curr_view->multicast_group->addTimedNode('e', timedNodeStart);
+        return res;
     };
-    auto commit_change = [this](DerechoSST& sst) { leader_commit_change(sst); };
+    auto commit_change = [this](DerechoSST& sst) { 
+	struct timespec timedNodeStart;
+        clock_gettime(CLOCK_REALTIME, &timedNodeStart);
+        leader_commit_change(sst);
+	curr_view->multicast_group->addTimedNode('E', timedNodeStart);
+    };
 
     auto leader_proposed_change = [this](const DerechoSST& gmsSST) {
-        return gmsSST.num_changes[curr_view->find_rank_of_leader()]
+	struct timespec timedNodeStart;
+        clock_gettime(CLOCK_REALTIME, &timedNodeStart);
+        bool res = gmsSST.num_changes[curr_view->find_rank_of_leader()]
                > gmsSST.num_acked[curr_view->my_rank];
+        curr_view->multicast_group->addTimedNode('f', timedNodeStart);
+	return res;
     };
-    auto ack_proposed_change = [this](DerechoSST& sst) { acknowledge_proposed_change(sst); };
+    auto ack_proposed_change = [this](DerechoSST& sst) {
+	struct timespec timedNodeStart;
+        clock_gettime(CLOCK_REALTIME, &timedNodeStart);
+	acknowledge_proposed_change(sst);
+	curr_view->multicast_group->addTimedNode('F', timedNodeStart);
+    };
 
     auto leader_committed_changes = [this](const DerechoSST& gmsSST) {
+	struct timespec timedNodeStart;
+        clock_gettime(CLOCK_REALTIME, &timedNodeStart);
         const int leader_rank = curr_view->find_rank_of_leader();
-        return gmsSST.num_committed[leader_rank]
+        bool res = gmsSST.num_committed[leader_rank]
                        > gmsSST.num_installed[curr_view->my_rank]
                && changes_includes_end_of_view(gmsSST, leader_rank);
+	curr_view->multicast_group->addTimedNode('g', timedNodeStart);
+	return res;
     };
-    auto view_change_trig = [this](DerechoSST& sst) { start_meta_wedge(sst); };
+    auto view_change_trig = [this](DerechoSST& sst) {
+	struct timespec timedNodeStart;
+        clock_gettime(CLOCK_REALTIME, &timedNodeStart);
+        start_meta_wedge(sst);
+	curr_view->multicast_group->addTimedNode('G', timedNodeStart);
+    };
     /* This predicate detects if there are pending changes that are not yet part of a batch,
      * and I am the leader. It should run once at the beginning of each view to see if we just
      * installed a new view that already has pending changes (but not more often than that).

@@ -20,7 +20,7 @@ auto ExternalClientCaller<T, ExternalGroupType>::p2p_send(node_id_t dest_node, A
             throw invalid_node_exception("Cannot send a p2p request to node "
                                         + std::to_string(dest_node) + ": it is not a member of the Group.");
         }
-        tcp::socket sock(std::get<0>(group.curr_view->member_ips_and_ports[rank]), std::get<PORT_TYPE::GMS>(group.curr_view->member_ips_and_ports[rank]));
+        tcp::socket sock(group.curr_view->member_ips_and_ports[rank].ip_address, group.curr_view->member_ips_and_ports[rank].gms_port);
 
         JoinResponse leader_response;
         bool success;
@@ -44,8 +44,8 @@ auto ExternalClientCaller<T, ExternalGroupType>::p2p_send(node_id_t dest_node, A
         }
 
         assert(dest_node != node_id);
-        sst::add_external_node(dest_node, std::pair<ip_addr_t, uint16_t>{std::get<0>(group.curr_view->member_ips_and_ports[rank]), 
-                                                                std::get<PORT_TYPE::EXTERNAL>(group.curr_view->member_ips_and_ports[rank])});
+        sst::add_external_node(dest_node, {group.curr_view->member_ips_and_ports[rank].ip_address,
+                group.curr_view->member_ips_and_ports[rank].external_port});
         group.p2p_connections->add_connections({dest_node});
     }
 
@@ -72,11 +72,15 @@ ExternalGroup<ReplicatedTypes...>::ExternalGroup(IDeserializationContext* deseri
         rdv.push_back(deserialization_context);
     }
 #ifdef USE_VERBS_API
-    sst::verbs_initialize(member_ips_and_sst_ports_map,
-                          curr_view->members[curr_view->my_rank]);
+    sst::verbs_initialize({},
+                          std::map<node_id_t, std::pair<ip_addr_t, uint16_t>>{{
+                            my_id, {getConfString(CONF_DERECHO_LOCAL_IP), getConfUInt16(CONF_DERECHO_EXTERNAL_PORT)}}},
+                          my_id);
 #else
-    sst::lf_initialize({}, my_id, std::map<node_id_t, std::pair<ip_addr_t, uint16_t>>{{my_id, 
-    {getConfString(CONF_DERECHO_LOCAL_IP), getConfUInt16(CONF_DERECHO_EXTERNAL_PORT)}}});
+    sst::lf_initialize({},
+                       std::map<node_id_t, std::pair<ip_addr_t, uint16_t>>{{
+                           my_id, {getConfString(CONF_DERECHO_LOCAL_IP), getConfUInt16(CONF_DERECHO_EXTERNAL_PORT)}}},
+                       my_id);
 #endif
 
     if (!get_view(INVALID_NODE_ID)) throw derecho_exception("Failed to contact the leader to request very first view.");
@@ -126,8 +130,8 @@ bool ExternalGroup<ReplicatedTypes...>::get_view(const node_id_t nid) {
     try {
         tcp::socket sock = (nid == INVALID_NODE_ID) ? 
         tcp::socket(getConfString(CONF_DERECHO_LEADER_IP), getConfUInt16(CONF_DERECHO_LEADER_GMS_PORT)):
-        tcp::socket(std::get<0>(curr_view->member_ips_and_ports[curr_view->rank_of(nid)]),
-                    std::get<PORT_TYPE::GMS>(curr_view->member_ips_and_ports[curr_view->rank_of(nid)]),
+        tcp::socket(curr_view->member_ips_and_ports[curr_view->rank_of(nid)].ip_address,
+                    curr_view->member_ips_and_ports[curr_view->rank_of(nid)].gms_port,
                     false);
         
         JoinResponse leader_response;
@@ -170,7 +174,7 @@ bool ExternalGroup<ReplicatedTypes...>::get_view(const node_id_t nid) {
 // template <typename... ReplicatedTypes>
 // tcp::socket& ExternalGroup<ReplicatedTypes...>::get_socket(node_id_t nid) {
 //     int rank = curr_view->rank_of(nid);
-//     return tcp::socket(std::get<0>(curr_view->member_ips_and_ports[rank]), std::get<PORT_TYPE::EXTERNAL>(curr_view->member_ips_and_ports[rank]));
+//     return tcp::socket(curr_view->member_ips_and_ports[rank].ip_address, curr_view->member_ips_and_ports[rank].external_port);
 // }
 
 template <typename... ReplicatedTypes>

@@ -6,7 +6,10 @@ project(derecho CXX)
 # Version
 set(derecho_VERSION 0.9)
 set(derecho_build_VERSION 0.9.2)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++1z")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++1z -fPIC")
+if (${USE_VERBS_API})
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DUSE_VERBS_API")
+endif()
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -DDERECHO_DEBUG -O0 -Wall -ggdb -gdwarf-3")
 set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -Wall")
 set(CMAKE_CXX_FLAGS_BENCHMARK "${CMAKE_CXX_FLAGS_RELEASE} -Wall -DNOLOG")
@@ -57,6 +60,9 @@ endif()
 # spdlog_FOUND
 find_package(spdlog 1.3.1 REQUIRED)
 
+# find openssl
+find_package(OpenSSL REQUIRED) 
+
 add_subdirectory(src/mutils-serialization)
 add_subdirectory(src/conf)
 add_subdirectory(src/utils)
@@ -81,7 +87,8 @@ target_link_libraries(derecho
     stdc++fs ${libfabric_LIBRARIES} 
     ${mutils_LIBRARIES} 
     ${mutils-containers_LIBRARIES}
-    ${mutils-tasks_LIBRARIES})
+    ${mutils-tasks_LIBRARIES}
+    ${OPENSSL_LIBRARIES}) 
 set_target_properties(derecho PROPERTIES
     SOVERSION ${derecho_VERSION}
     VERSION ${derecho_build_VERSION}
@@ -130,9 +137,6 @@ install(FILES
     "${CMAKE_CURRENT_BINARY_DIR}/derecho/derechoConfigVersion.cmake"
     DESTINATION ${ConfigPackageLocation}
 )
-
-# objectstore aka dPods
-add_subdirectory(src/objectstore)
 
 # applications
 add_subdirectory(src/applications)

@@ -64,8 +64,42 @@ void SST<DerivedSST>::detect() {
         std::unique_lock<std::mutex> lock(thread_start_mutex);
         thread_start_cv.wait(lock, [this]() { return thread_start; });
     }
+	double gamma_min = 5.0; // TODO look into good values for this
+	double gamma_0 = 100.0; // TODO look into good values for this
+	int batch_size = 5; // arbitrarily chosen for now
+	double T_max = 1000.0; // 1 usec
+	int n_recurrent = predicates.recurrent_predicates.size();
+	int Ts[n_recurrent];
+	int Js[n_recurrent];
+	double gammas[n_recurrent];
+	int probing_dirs[n_recurrent];
+	timespec last_evaluated[n_recurrent];
+	for (int i=0; i<n_recurrent; ++i) {
+		Ts[i] = 0;
+		Js[i] = 0;
+		probing_dirs[i] = 1;
+		gammas[i] = std::max(gamma_min, gamma_0 / batch_size); // this is 20
+		clock_gettime(CLOCK_REALTIME, &last_evaluated[i]);
+	}
+	
+	//std::uniform_real_distribution<double> dither_distr(-1.0,1.0);
+	auto update_batching_vars = [&probing_dirs, &Ts, &Js, &gammas, T_max](int pred_idx, int new_J) {
+		double dither = static_cast <double> (rand()) / static_cast <double> (RAND_MAX); //dither_distr(time(NULL));
+		probing_dirs[pred_idx] *= std::signbit(Js[pred_idx] - new_J);
+		Ts[pred_idx] = std::min(T_max, Ts[pred_idx] + probing_dirs[pred_idx] * gammas[pred_idx] + dither);
+		Js[pred_idx] = new_J;
+	};
+	
+	
     struct timespec last_time, cur_time;
     clock_gettime(CLOCK_REALTIME, &last_time);
+	
+	auto should_eval_pred = [&last_evaluated, &Ts](int pred_idx, timespec* current_time) {
+		double curr_nano = (double)current_time->tv_sec + 1.0e-9*current_time->tv_nsec;
+		double last_nano = (double)last_evaluated[pred_idx].tv_sec + 1.0e-9*last_evaluated[pred_idx].tv_nsec;
+        return Ts[pred_idx] < curr_nano - last_nano;
+    };  
+    
 
     while(!thread_shutdown) {
         bool predicate_fired = false;
@@ -88,14 +122,20 @@ void SST<DerivedSST>::detect() {
         }
 
         // recurrent predicates are evaluated each time they are found to be true
+		int pred_idx;
         for(auto& pred : predicates.recurrent_predicates) {
-            if(pred != nullptr && (pred->first(*derived_this) == true)) {
-                predicate_fired = true;
-                std::shared_ptr<typename Predicates<DerivedSST>::trig> trigger(pred->second);
-                predicates_lock.unlock();
-                (*trigger)(*derived_this);
-                predicates_lock.lock();
+			if(pred != nullptr) {
+				clock_gettime(CLOCK_REALTIME,&cur_time);
+			 	if (should_eval_pred(pred_idx, &cur_time) && (pred->first(*derived_this) == true)) {
+                	predicate_fired = true;
+                	std::shared_ptr<typename Predicates<DerivedSST>::trig> trigger(pred->second);
+            	 	predicates_lock.unlock();
+               		(*trigger)(*derived_this);
+                	predicates_lock.lock();
+					update_batching_vars(pred_idx, 10); // TODO replace 10 with the new calculated J
+				}
             }
+			pred_idx++;
         }
 
         // transition predicates are only evaluated when they change from false to true

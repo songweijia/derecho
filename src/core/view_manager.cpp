@@ -662,49 +662,56 @@ void ViewManager::register_predicates() {
 	struct timespec timedNodeStart;
 	clock_gettime(CLOCK_REALTIME, &timedNodeStart);	
 	bool res = active_leader && suspected_not_equal(sst, last_suspected);
-	curr_view->multicast_group->addTimedNode('a', timedNodeStart);
+	std::string observation("leader suspected change predicate");
+	curr_view->multicast_group->addTimedNode(observation, timedNodeStart);
         return res;
     };
     auto nonleader_suspected_changed = [this](const DerechoSST& sst) {
 	struct timespec timedNodeStart;
         clock_gettime(CLOCK_REALTIME, &timedNodeStart);
         bool res = !active_leader && suspected_not_equal(sst, last_suspected);
-        curr_view->multicast_group->addTimedNode('b', timedNodeStart);
+		std::string observation("nonleader suspected change predicate");
+        curr_view->multicast_group->addTimedNode(observation, timedNodeStart);
         return res;
     };
     auto new_suspicion_trig = [this](DerechoSST& sst) { 
-	struct timespec timedNodeStart;
+		struct timespec timedNodeStart;
         clock_gettime(CLOCK_REALTIME, &timedNodeStart);
         new_suspicion(sst);
-	curr_view->multicast_group->addTimedNode('B', timedNodeStart);	    
+		std::string observation("nonleader suspected change trigger");
+		curr_view->multicast_group->addTimedNode(observation, timedNodeStart);	    
     };
 
     auto start_join_pred = [this](const DerechoSST& sst) {
 	struct timespec timedNodeStart;
         clock_gettime(CLOCK_REALTIME, &timedNodeStart);
         bool res = active_leader && has_pending_join();
-        curr_view->multicast_group->addTimedNode('c', timedNodeStart);
+		std::string observation("start join predicate");
+        curr_view->multicast_group->addTimedNode(observation, timedNodeStart);
         return res;
     };
     auto propose_changes_trig = [this](DerechoSST& sst) { 
 	struct timespec timedNodeStart;
         clock_gettime(CLOCK_REALTIME, &timedNodeStart);
         propose_changes(sst);
-        curr_view->multicast_group->addTimedNode('A', timedNodeStart);   
+		std::string observation("leader suspected change trigger");
+        curr_view->multicast_group->addTimedNode(observation, timedNodeStart);   
     };
 
     auto new_sockets_pred = [this](const DerechoSST& sst) {
 	struct timespec timedNodeStart;
         clock_gettime(CLOCK_REALTIME, &timedNodeStart);
         bool res = has_pending_new();
-        curr_view->multicast_group->addTimedNode('d', timedNodeStart);
+		std::string observation("new sockets predicate");
+        curr_view->multicast_group->addTimedNode(observation, timedNodeStart);
         return res;
     };
     auto new_sockets = [this](DerechoSST& sst) { 
 	struct timespec timedNodeStart;
         clock_gettime(CLOCK_REALTIME, &timedNodeStart);
         process_new_sockets();
-        curr_view->multicast_group->addTimedNode('D', timedNodeStart);
+		std::string observation("new sockets trigger");
+        curr_view->multicast_group->addTimedNode(observation, timedNodeStart);
     };
 
     auto change_commit_ready = [this](const DerechoSST& gmsSST) {
@@ -712,14 +719,16 @@ void ViewManager::register_predicates() {
         clock_gettime(CLOCK_REALTIME, &timedNodeStart);
         bool res = active_leader
                && min_acked(gmsSST, curr_view->failed) > gmsSST.num_committed[curr_view->my_rank];
-        curr_view->multicast_group->addTimedNode('e', timedNodeStart);
+		std::string observation("change commit ready predicate");
+        curr_view->multicast_group->addTimedNode(observation, timedNodeStart);
         return res;
     };
     auto commit_change = [this](DerechoSST& sst) { 
-	struct timespec timedNodeStart;
+		struct timespec timedNodeStart;
         clock_gettime(CLOCK_REALTIME, &timedNodeStart);
         leader_commit_change(sst);
-	curr_view->multicast_group->addTimedNode('E', timedNodeStart);
+		std::string observation("change commit ready trigger");
+		curr_view->multicast_group->addTimedNode(observation, timedNodeStart);
     };
 
     auto leader_proposed_change = [this](const DerechoSST& gmsSST) {
@@ -727,14 +736,16 @@ void ViewManager::register_predicates() {
         clock_gettime(CLOCK_REALTIME, &timedNodeStart);
         bool res = gmsSST.num_changes[curr_view->find_rank_of_leader()]
                > gmsSST.num_acked[curr_view->my_rank];
-        curr_view->multicast_group->addTimedNode('f', timedNodeStart);
+        std::string observation("leader proposed change predicate");
+		curr_view->multicast_group->addTimedNode(observation, timedNodeStart);
 	return res;
     };
     auto ack_proposed_change = [this](DerechoSST& sst) {
-	struct timespec timedNodeStart;
+		struct timespec timedNodeStart;
         clock_gettime(CLOCK_REALTIME, &timedNodeStart);
 	acknowledge_proposed_change(sst);
-	curr_view->multicast_group->addTimedNode('F', timedNodeStart);
+	std::string observation("leader proposed change trigger");
+	curr_view->multicast_group->addTimedNode(observation, timedNodeStart);
     };
 
     auto leader_committed_changes = [this](const DerechoSST& gmsSST) {
@@ -744,14 +755,16 @@ void ViewManager::register_predicates() {
         bool res = gmsSST.num_committed[leader_rank]
                        > gmsSST.num_installed[curr_view->my_rank]
                && changes_includes_end_of_view(gmsSST, leader_rank);
-	curr_view->multicast_group->addTimedNode('g', timedNodeStart);
+		std::string observation("leader committed change predicate");
+		curr_view->multicast_group->addTimedNode(observation, timedNodeStart);
 	return res;
     };
     auto view_change_trig = [this](DerechoSST& sst) {
-	struct timespec timedNodeStart;
+		struct timespec timedNodeStart;
         clock_gettime(CLOCK_REALTIME, &timedNodeStart);
         start_meta_wedge(sst);
-	curr_view->multicast_group->addTimedNode('G', timedNodeStart);
+		std::string observation("leader committed change trigger");
+		curr_view->multicast_group->addTimedNode(observation, timedNodeStart);
     };
     /* This predicate detects if there are pending changes that are not yet part of a batch,
      * and I am the leader. It should run once at the beginning of each view to see if we just

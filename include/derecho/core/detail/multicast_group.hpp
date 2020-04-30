@@ -490,20 +490,20 @@ public:
     ~MulticastGroup();
 
      struct TimedNode {
-           char observation ='\0';
-           timespec start;
-	   long long int duration_nsec = -1;
-           struct TimedNode* next = NULL;
+        char observation[300];
+		timespec start;
+		long long int duration_nsec = -1;
+        struct TimedNode* next = NULL;
     };
     TimedNode* initTimedNode = NULL;
     TimedNode* currTimedNode = NULL;
     TimedNode* getInitTimedNode() { return initTimedNode; };
-    void addTimedNode(char observation, timespec startTime) {
+    void addTimedNode(std::string observation, timespec startTime) {
 	    struct timespec endTime;
 	    clock_gettime(CLOCK_REALTIME, &endTime);
-		    //std::chrono::time_point<std::chrono::system_clock> startTime, std::chrono::time_point<std::chrono::system_clock> endTime) {
-            TimedNode* node = new TimedNode();
-            node->observation = observation;
+		//std::chrono::time_point<std::chrono::system_clock> startTime, std::chrono::time_point<std::chrono::system_clock> endTime) {
+        TimedNode* node = new TimedNode();
+        observation.copy(node->observation, observation.size()+1);
 	    node->start = startTime;
 	    node->duration_nsec = (endTime.tv_sec - startTime.tv_sec) * (long long int)1e9 + (endTime.tv_nsec - startTime.tv_nsec);
 	    //int start = std::chrono::duration_cast<std::chrono::microseconds>(startTime.time_since_epoch()).count();

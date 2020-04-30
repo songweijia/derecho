@@ -193,15 +193,19 @@ int main(int argc, char* argv[]) {
 
     group.barrier_sync();
     group.leave();
-    char outFileName[200];
-    std::sprintf(outFileName, "bandwidth_predicates_%d-nodes_%d-senderSelector_%d-messages.log",
+	if (node_rank == 0) {
+    	char outFileName[200];
+	    std::sprintf(outFileName, "bandwidth_predicates_%d-nodes_%d-senderSelector_%d-messages.log",
 			    num_nodes, num_senders_selector, num_messages);
-    std::ofstream fs(outFileName,std::ios_base::trunc | std::ios_base::out);
-    MulticastGroup::TimedNode* node = group.getInitTimedNode();
-    fs << "even,start(nanosec),duration(nanosec)\n";
-    while (node != NULL) {
-	    long long int start_nsec = node->start.tv_sec * (long long int)1e9 + node->start.tv_nsec;
-	    fs << node->observation << "," << start_nsec << "," << node->duration_nsec << "\n";
-	    node = node->next;
-    }
+		std::ofstream fs(outFileName,std::ios_base::trunc | std::ios_base::out);
+		MulticastGroup::TimedNode* node = group.getInitTimedNode();
+   	 	fs << "event,start(nanosec),duration(nanosec)\n";
+   	 	while (node != NULL) {
+			long long int start_nsec = node->start.tv_sec * (long long int)1e9 + node->start.tv_nsec;
+			fs << node->observation << "," << start_nsec << "," << node->duration_nsec << "\n";
+			node = node->next;
+    	}
+		fs << nanoseconds_elapsed << "\n";
+		fs.close();
+	}
 }

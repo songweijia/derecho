@@ -636,7 +636,8 @@ for(uint sender_count = 0; sender_count < num_shard_senders; ++sender_count) {
             return true;
         }
     }
-MulticastGroup::addTimedNode('r', timedNodeStart);
+	std::string observation("receive predicate");
+	MulticastGroup::addTimedNode(observation, timedNodeStart);
     return false;
 }
 
@@ -858,7 +859,8 @@ void MulticastGroup::register_predicates() {
     receiver_function(subgroup_num, subgroup_settings,
                               shard_ranks_by_sender_rank, num_shard_senders, sst,
                               batch_size, sst_receive_handler_lambda);
-	MulticastGroup::addTimedNode('R', timedNodeStart);
+	std::string observation("receive trigger");
+	MulticastGroup::addTimedNode(observation, timedNodeStart);
         };
         receiver_pred_handles.emplace_back(sst->predicates.insert(receiver_pred, receiver_trig,
                                                                  sst::PredicateType::RECURRENT));
@@ -876,16 +878,17 @@ void MulticastGroup::register_predicates() {
                     message_id_t stable_num_copy = sst.seq_num[node_id_to_sst_index.at(subgroup_settings.members[i])][subgroup_num];
                     min_stable_num = std::min(min_stable_num, stable_num_copy);
                 }
-
-				MulticastGroup::addTimedNode('d', timedNodeStart);
+				std::string observation("delivery predicate");
+				MulticastGroup::addTimedNode(observation, timedNodeStart);
 
 		return min_stable_num > sst.delivered_num[member_index][subgroup_num];
             };
             auto delivery_trig = [this, subgroup_num, subgroup_settings, num_shard_members](DerechoSST& sst) mutable {
-		struct timespec timedNodeStart;
-		clock_gettime(CLOCK_REALTIME, &timedNodeStart);
+				struct timespec timedNodeStart;
+				clock_gettime(CLOCK_REALTIME, &timedNodeStart);
                 delivery_trigger(subgroup_num, subgroup_settings, num_shard_members, sst);
-		MulticastGroup::addTimedNode('D', timedNodeStart);
+				std::string observation("delivery trigger");
+				MulticastGroup::addTimedNode(observation, timedNodeStart);
             };
 
             delivery_pred_handles.emplace_back(sst->predicates.insert(delivery_pred, delivery_trig,
@@ -903,7 +906,8 @@ void MulticastGroup::register_predicates() {
                     persistent::version_t persisted_num_copy = sst.persisted_num[node_id_to_sst_index.at(subgroup_settings.members[i])][subgroup_num];
                     min_persisted_num = std::min(min_persisted_num, persisted_num_copy);
                 }
-		MulticastGroup::addTimedNode('p', timedNodeStart);
+				std::string observation("persistence predicate");
+				MulticastGroup::addTimedNode(observation, timedNodeStart);
                 return (version_seen < min_persisted_num) && callbacks.global_persistence_callback;
             };
             auto persistence_trig = [this, subgroup_num, subgroup_settings, num_shard_members,
@@ -923,7 +927,8 @@ void MulticastGroup::register_predicates() {
                     callbacks.global_persistence_callback(subgroup_num, min_persisted_num);
                     version_seen = min_persisted_num;
                 }
-				MulticastGroup::addTimedNode('P', timedNodeStart);
+				std::string observation("persistence trigger");
+				MulticastGroup::addTimedNode(observation, timedNodeStart);
             };
 
             persistence_pred_handles.emplace_back(sst->predicates.insert(persistence_pred, persistence_trig, sst::PredicateType::RECURRENT));
@@ -936,19 +941,23 @@ void MulticastGroup::register_predicates() {
                     for(uint i = 0; i < num_shard_members; ++i) {
                         if(sst.delivered_num[node_id_to_sst_index.at(subgroup_settings.members[i])][subgroup_num] < seq_num
                            || (sst.persisted_num[node_id_to_sst_index.at(subgroup_settings.members[i])][subgroup_num] < seq_num)) {
-                            MulticastGroup::addTimedNode('s', timedNodeStart);
+                            	
+								std::string observation("send predicate");
+								MulticastGroup::addTimedNode(observation, timedNodeStart);
 								return false;
                         }
                     }
-					MulticastGroup::addTimedNode('s', timedNodeStart);
+					std::string observation("send predicate");
+					MulticastGroup::addTimedNode(observation, timedNodeStart);
                     return true;
                 };
                 auto sender_trig = [this, subgroup_num](DerechoSST& sst) {
-			struct timespec timedNodeStart;
+					struct timespec timedNodeStart;
                 	clock_gettime(CLOCK_REALTIME, &timedNodeStart);
 			sender_cv.notify_all();
                     	next_message_to_deliver[subgroup_num]++;
-                	MulticastGroup::addTimedNode('S', timedNodeStart);
+					std::string observation("send trigger");
+                	MulticastGroup::addTimedNode(observation, timedNodeStart);
 				};
                 sender_pred_handles.emplace_back(sst->predicates.insert(sender_pred, sender_trig,
                                                                         sst::PredicateType::RECURRENT));
@@ -963,18 +972,21 @@ void MulticastGroup::register_predicates() {
                         uint32_t num_received_offset = subgroup_settings.num_received_offset;
                         if(sst.num_received[node_id_to_sst_index.at(subgroup_settings.members[i])][num_received_offset + subgroup_settings.sender_rank]
                            < static_cast<int32_t>(future_message_indices[subgroup_num] - 1 - subgroup_settings.profile.window_size)) {
-                            MulticastGroup::addTimedNode('s', timedNodeStart);
+                            	std::string observation("send predicate");
+								MulticastGroup::addTimedNode(observation, timedNodeStart);
 								return false;
                         }
                     }
-					MulticastGroup::addTimedNode('s', timedNodeStart);
+					std::string observation("send predicate");
+					MulticastGroup::addTimedNode(observation, timedNodeStart);
                     return true;
                 };
                 auto sender_trig = [this](DerechoSST& sst) {
 			struct timespec timedNodeStart;
                 	clock_gettime(CLOCK_REALTIME, &timedNodeStart);
                     sender_cv.notify_all();
-			MulticastGroup::addTimedNode('S', timedNodeStart);
+					std::string observation("send trigger");
+					MulticastGroup::addTimedNode(observation, timedNodeStart);
                 };
                 sender_pred_handles.emplace_back(sst->predicates.insert(sender_pred, sender_trig,
                                                                         sst::PredicateType::RECURRENT));

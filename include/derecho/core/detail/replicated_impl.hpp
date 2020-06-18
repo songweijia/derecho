@@ -27,7 +27,8 @@ Replicated<T>::Replicated(subgroup_type_id_t type_id, node_id_t nid, subgroup_id
           wrapped_this(group_rpc_manager.make_remote_invocable_class(user_object_ptr.get(),
                                                                      type_id, subgroup_id,
                                                                      T::register_functions())),
-          group(group) {
+          group(group),
+          subgroup_caller(type_id, nid, subgroup_id, shard_num, group_rpc_manager) {
     if constexpr(std::is_base_of_v<GroupReference, T>) {
         (**user_object_ptr).set_group_pointers(group, subgroup_index);
     }
@@ -48,7 +49,8 @@ Replicated<T>::Replicated(subgroup_type_id_t type_id, node_id_t nid, subgroup_id
           wrapped_this(group_rpc_manager.make_remote_invocable_class(user_object_ptr.get(),
                                                                      type_id, subgroup_id,
                                                                      T::register_functions())),
-          group(group) {}
+          group(group),
+          subgroup_caller(nid, subgroup_id, shard_num, group_rpc_manager) {}
 
 template <typename T>
 Replicated<T>::Replicated(Replicated&& rhs) : persistent_registry_ptr(std::move(rhs.persistent_registry_ptr)),
@@ -59,7 +61,8 @@ Replicated<T>::Replicated(Replicated&& rhs) : persistent_registry_ptr(std::move(
                                               shard_num(rhs.shard_num),
                                               group_rpc_manager(rhs.group_rpc_manager),
                                               wrapped_this(std::move(rhs.wrapped_this)),
-                                              group(rhs.group) {
+                                              group(rhs.group),
+                                              subgroup_caller(std::move(rhs.subgroup_caller)) {
     persistent_registry_ptr->updateTemporalFrontierProvider(this);
 }
 
@@ -68,70 +71,6 @@ Replicated<T>::~Replicated() {
     // hack to check if the object was merely moved
     if(wrapped_this) {
         group_rpc_manager.destroy_remote_invocable_class(subgroup_id);
-    }
-}
-
-template <typename T>
-template <rpc::FunctionTag tag, typename... Args>
-auto Replicated<T>::p2p_send(node_id_t dest_node, Args&&... args) {
-    if(is_valid()) {
-        if(group_rpc_manager.view_manager.get_current_view().get().rank_of(dest_node) == -1) {
-            throw invalid_node_exception("Cannot send a p2p request to node "
-                    + std::to_string(dest_node) + ": it is not a member of the Group.");
-        }
-        auto return_pair = wrapped_this->template send<tag>(
-                [this, &dest_node](size_t size) -> char* {
-                    const std::size_t max_p2p_request_payload_size = getConfUInt64(CONF_DERECHO_MAX_P2P_REQUEST_PAYLOAD_SIZE);
-                    if(size <= max_p2p_request_payload_size) {
-                        return (char*)group_rpc_manager.get_sendbuffer_ptr(dest_node,
-                                                                           sst::REQUEST_TYPE::P2P_REQUEST);
-                    } else {
-                        throw derecho_exception("The size of serialized args exceeds the maximum message size.");
-                    }
-                },
-                std::forward<Args>(args)...);
-        group_rpc_manager.finish_p2p_send(dest_node, subgroup_id, return_pair.pending);
-        return std::move(return_pair.results);
-    } else {
-        throw empty_reference_exception{"Attempted to use an empty Replicated<T>"};
-    }
-}
-
-template <typename T>
-template <rpc::FunctionTag tag, typename... Args>
-auto Replicated<T>::ordered_send(Args&&... args) {
-    if(is_valid()) {
-        size_t payload_size_for_multicast_send = wrapped_this->template get_size_for_ordered_send<tag>(std::forward<Args>(args)...);
-
-        using Ret = typename std::remove_pointer<decltype(wrapped_this->template getReturnType<tag>(
-                std::forward<Args>(args)...))>::type;
-        rpc::QueryResults<Ret>* results_ptr;
-        rpc::PendingResults<Ret>* pending_ptr;
-        auto serializer = [&](char* buffer) {
-            //By the time this lambda runs, the current thread will be holding a read lock on view_mutex
-            const std::size_t max_payload_size = group_rpc_manager.view_manager.get_max_payload_sizes().at(subgroup_id);
-            auto send_return_struct = wrapped_this->template send<tag>(
-                    [&buffer, &max_payload_size](size_t size) -> char* {
-                        if(size <= max_payload_size) {
-                            return buffer;
-                        } else {
-                            throw derecho_exception("The size of serialized args exceeds the maximum message size.");
-                        }
-                    },
-                    std::forward<Args>(args)...);
-            results_ptr = new rpc::QueryResults<Ret>(std::move(send_return_struct.results));
-            pending_ptr = &send_return_struct.pending;
-        };
-
-        std::shared_lock<std::shared_timed_mutex> view_read_lock(group_rpc_manager.view_manager.view_mutex);
-        group_rpc_manager.view_manager.view_change_cv.wait(view_read_lock, [&]() {
-            return group_rpc_manager.view_manager.curr_view
-                    ->multicast_group->send(subgroup_id, payload_size_for_multicast_send, serializer, true);
-        });
-        group_rpc_manager.finish_rpc_send(subgroup_id, *pending_ptr);
-        return std::move(*results_ptr);
-    } else {
-        throw empty_reference_exception{"Attempted to use an empty Replicated<T>"};
     }
 }
 
@@ -202,52 +141,14 @@ const uint64_t Replicated<T>::compute_global_stability_frontier() {
 }
 
 template <typename T>
-ExternalCaller<T>::ExternalCaller(uint32_t type_id, node_id_t nid, subgroup_id_t subgroup_id,
-                                  rpc::RPCManager& group_rpc_manager)
-        : node_id(nid),
-          subgroup_id(subgroup_id),
-          group_rpc_manager(group_rpc_manager),
-          wrapped_this(rpc::make_remote_invoker<T>(nid, type_id, subgroup_id,
-                                                                T::register_functions(), *group_rpc_manager.receivers)) {}
-
-//This is literally copied and pasted from Replicated<T>. I wish I could let them share code with inheritance,
-//but I'm afraid that will introduce unnecessary overheads.
-template <typename T>
 template <rpc::FunctionTag tag, typename... Args>
-auto ExternalCaller<T>::p2p_send(node_id_t dest_node, Args&&... args) {
-    if(is_valid()) {
-        assert(dest_node != node_id);
-        if(group_rpc_manager.view_manager.get_current_view().get().rank_of(dest_node) == -1) {
-            throw invalid_node_exception("Cannot send a p2p request to node "
-                    + std::to_string(dest_node) + ": it is not a member of the Group.");
-        }
-        auto return_pair = wrapped_this->template send<tag>(
-                [this, &dest_node](size_t size) -> char* {
-                    const std::size_t max_payload_size = group_rpc_manager.view_manager.get_max_payload_sizes().at(subgroup_id);
-                    if(size <= max_payload_size) {
-                        return (char*)group_rpc_manager.get_sendbuffer_ptr(dest_node,
-                                                                           sst::REQUEST_TYPE::P2P_REQUEST);
-                    } else {
-                        throw derecho_exception("The size of serialized args exceeds the maximum message size.");
-                    }
-                },
-                std::forward<Args>(args)...);
-        group_rpc_manager.finish_p2p_send(dest_node, subgroup_id, return_pair.pending);
-        return std::move(return_pair.results);
-    } else {
-        throw empty_reference_exception{"Attempted to use an empty Replicated<T>"};
-    }
-}
-
-template <typename T>
-template <rpc::FunctionTag tag, typename... Args>
-auto ShardIterator<T>::p2p_send(Args&&... args) {
+auto ShardIterator<T>::ordered_send(Args&&... args) {
     // shard_reps should have at least one member
-    auto send_result = EC.template p2p_send<tag>(shard_reps.at(0), std::forward<Args>(args)...);
+    auto send_result = SC.template ordered_send<tag>(shard_reps.at(0), std::forward<Args>(args)...);
     std::vector<decltype(send_result)> send_result_vec;
     send_result_vec.emplace_back(std::move(send_result));
     for(uint i = 1; i < shard_reps.size(); ++i) {
-        send_result_vec.emplace_back(EC.template p2p_send<tag>(shard_reps[i], std::forward<Args>(args)...));
+        send_result_vec.emplace_back(SC.template ordered_send<tag>(shard_reps[i], std::forward<Args>(args)...));
     }
     return send_result_vec;
 }

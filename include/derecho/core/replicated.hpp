@@ -17,6 +17,7 @@
 #include "detail/replicated_interface.hpp"
 #include "detail/rpc_manager.hpp"
 #include "detail/rpc_utils.hpp"
+#include "subgroup_caller.hpp"
 
 #include <derecho/persistent/Persistent.hpp>
 #include <derecho/tcp/tcp.hpp>
@@ -98,6 +99,8 @@ private:
     persistent::version_t next_version = persistent::INVALID_VERSION;
     uint64_t next_timestamp_us = 0;
 
+    /** A subgroup caller that abstracts ordered_send APIs */
+    SubgroupCaller<T> subgroup_caller;
 public:
     /**
      * Constructs a Replicated<T> that enables sending and receiving RPC
@@ -178,30 +181,6 @@ public:
     uint32_t get_shard_num() const {
         return shard_num;
     }
-
-    /**
-     * Sends a peer-to-peer message to a single member of the subgroup that
-     * replicates this Replicated<T>, invoking the RPC function identified
-     * by the FunctionTag template parameter.
-     * @param dest_node The ID of the node that the P2P message should be sent to
-     * @param args The arguments to the RPC function being invoked
-     * @return An instance of rpc::QueryResults<Ret>, where Ret is the return type
-     * of the RPC function being invoked
-     */
-    template <rpc::FunctionTag tag, typename... Args>
-    auto p2p_send(node_id_t dest_node, Args&&... args);
-
-    /**
-     * Sends a multicast to the entire subgroup that replicates this Replicated<T>,
-     * invoking the RPC function identified by the FunctionTag template parameter.
-     * The caller must keep the returned QueryResults object in scope in order to
-     * receive replies.
-     * @param args The arguments to the RPC function
-     * @return An instance of rpc::QueryResults<Ret>, where Ret is the return type
-     * of the RPC function being invoked.
-     */
-    template <rpc::FunctionTag tag, typename... Args>
-    auto ordered_send(Args&&... args);
 
     /**
      * Submits a call to send a "raw" (byte array) message in a multicast to
@@ -323,51 +302,19 @@ public:
     }
 };
 
-template <typename T>
-class ExternalCaller {
-private:
-    /** The ID of this node */
-    const node_id_t node_id;
-    /** The internally-generated subgroup ID of the subgroup that this ExternalCaller will contact. */
-    subgroup_id_t subgroup_id;
-    /** Reference to the RPCManager for the Group this ExternalCaller is in */
-    rpc::RPCManager& group_rpc_manager;
-    /** The actual implementation of ExternalCaller, which has lots of ugly template parameters */
-    std::unique_ptr<rpc::RemoteInvokerFor<T>> wrapped_this;
-
-public:
-    ExternalCaller(uint32_t type_id, node_id_t nid, subgroup_id_t subgroup_id, rpc::RPCManager& group_rpc_manager);
-
-    ExternalCaller(ExternalCaller&&) = default;
-    ExternalCaller(const ExternalCaller&) = delete;
-
-    /**
-     * Sends a peer-to-peer message to a single member of the subgroup that
-     * this ExternalCaller<T> connects to, invoking the RPC function identified
-     * by the FunctionTag template parameter.
-     * @param dest_node The ID of the node that the P2P message should be sent to
-     * @param args The arguments to the RPC function being invoked
-     * @return An instance of rpc::QueryResults<Ret>, where Ret is the return type
-     * of the RPC function being invoked
-     */
-    template <rpc::FunctionTag tag, typename... Args>
-    auto p2p_send(node_id_t dest_node, Args&&... args);
-
-    bool is_valid() const { return true; }
-};
 
 template <typename T>
 class ShardIterator {
 private:
-    ExternalCaller<T>& EC;
+    SubgroupCaller<T>& SC;
     const std::vector<node_id_t> shard_reps;
 
 public:
-    ShardIterator(ExternalCaller<T>& EC, std::vector<node_id_t> shard_reps)
-            : EC(EC),
+    ShardIterator(SubgroupCaller<T>& SC, std::vector<node_id_t> shard_reps)
+            : SC(SC),
               shard_reps(shard_reps) {}
     template <rpc::FunctionTag tag, typename... Args>
-    auto p2p_send(Args&&... args);
+    auto ordered_send(Args&&... args);
 };
 }  // namespace derecho
 

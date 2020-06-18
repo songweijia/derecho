@@ -5,10 +5,11 @@
 namespace derecho {
 
 template <typename T>
-SubgroupCaller<T>::SubgroupCaller(uint32_t type_id, node_id_t nid, subgroup_id_t subgroup_id, shard_t shard_num,
+SubgroupCaller<T>::SubgroupCaller(uint32_t type_id, node_id_t nid, subgroup_id_t subgroup_id, uint32_t shard_num,
                                   rpc::RPCManager& group_rpc_manager)
         : node_id(nid),
           subgroup_id(subgroup_id),
+          shard_num(shard_num),
           group_rpc_manager(group_rpc_manager),
           wrapped_this(rpc::make_remote_invoker<T>(nid, type_id, subgroup_id,
                                                                 T::register_functions(), *group_rpc_manager.receivers)) {}
@@ -54,7 +55,8 @@ auto SubgroupCaller<T>::in_subgroup_ordered_send(Args&&... args) {
 
 template <typename T>
 template <rpc::FunctionTag tag, typename... Args>
-auto SubgroupCaller<T>::ordered_send(node_id_t dest_node, Args&&... args) {
+auto SubgroupCaller<T>::ordered_send(NodeId dest_node_id, Args&&... args) {
+    node_id_t dest_node = dest_node_id.get();
     if(is_valid()) {
         if(group_rpc_manager.view_manager.get_current_view().get().rank_of(dest_node) == -1) {
             throw invalid_node_exception("Cannot send a p2p request to node "
@@ -80,8 +82,9 @@ auto SubgroupCaller<T>::ordered_send(node_id_t dest_node, Args&&... args) {
 
 template <typename T>
 template <rpc::FunctionTag tag, typename... Args>
-auto SubgroupCaller<T>::ordered_send(shard_t sn, Args&&... args) {
-    if (sn == node_id) {
+auto SubgroupCaller<T>::ordered_send(ShardNum dest_shard_num, Args&&... args) {
+    uint32_t sn = dest_shard_num.get();
+    if (sn == shard_num) {
         return in_subgroup_ordered_send<tag>(std::forward<Args>(args)...);
     } else {
         // TODO: relayed ordered send

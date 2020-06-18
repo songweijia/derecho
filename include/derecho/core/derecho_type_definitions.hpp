@@ -3,4 +3,6 @@
 using ip_addr_t = std::string;
 /** Type alias for Node IDs in a Derecho group. */
 using node_id_t = uint32_t;
+/** Type alias for Shard Numbers in a Derecho subgroup. */
+using shard_t = uint32_t;
 #define INVALID_NODE_ID (0xffffffff)

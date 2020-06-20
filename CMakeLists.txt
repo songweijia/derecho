@@ -137,3 +137,6 @@ install(FILES
 
 # applications
 add_subdirectory(src/applications)
+
+# for dds_demo
+add_subdirectory(src/objectstore)

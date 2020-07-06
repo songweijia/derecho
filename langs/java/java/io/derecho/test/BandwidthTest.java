@@ -193,11 +193,11 @@ public class BandwidthTest implements IShardViewGenerator, Group.ICallbackSet, I
               + "\nNumber of senders: "
               + num_senders_selector
               + "\nMax message size: "
-              + max_msg_size
+              + max_msg_size + " Bytes"
               + "\nNumber of messages: "
               + num_messages
               + "\nBandwidth: "
-              + bw);
+              + bw + " GBytes/s");
     }
 
     // Leave the group.

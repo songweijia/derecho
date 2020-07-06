@@ -1,12 +1,22 @@
 cmake_minimum_required (VERSION 3.0)
 project(derecho_jni)
 
-find_package(derecho REQUIRED)
-message(STATUS "Found derecho.")
-message(STATUS "include:" ${derecho_INCLUDE_DIRS})
-message(STATUS "library:" ${derecho_LIBRARIES})
-find_package(Java REQUIRED)
-find_package(JNI REQUIRED)
+find_package(Java)
+
+if (NOT Java_FOUND)
+    message("Java not found - skipping building tests")
+	return()
+endif (NOT Java_FOUND)
+
+find_package(JNI)
+
+if (NOT JNI_FOUND)
+	message("JNI not found - skipping building tests")
+	return()
+endif (NOT JNI_FOUND)
+
+
+
 include(UseJava)
 
 set(CMAKE_JAVA_COMPILE_FLAGS "-source" "11" "-target" "11" "-h" "${CMAKE_SOURCE_DIR}/cpp")
@@ -26,9 +36,11 @@ add_jar(derechoBWjar
         java/io/derecho/test/BandwidthTest.java
         java/io/derecho/IMessageGenerator.java
     ENTRY_POINT
-	io/derecho/test/BandwidthTest
+		io/derecho/test/BandwidthTest
     OUTPUT_NAME
         bandwidth_test
+	MANIFEST
+		Manifest.txt
     INCLUDE_JARS
 )
 
@@ -45,6 +57,8 @@ add_jar(derechoLjar
 	io/derecho/test/LatencyTest
     OUTPUT_NAME
         latency_test
+	MANIFEST
+		Manifest.txt
     INCLUDE_JARS
 )
 
@@ -61,6 +75,8 @@ add_jar(derechoTSjar
 	io/derecho/test/TypedSubgroupTest
     OUTPUT_NAME
         typed_subgroup_test
+	MANIFEST
+		Manifest.txt
     INCLUDE_JARS
 )
 
@@ -77,7 +93,20 @@ add_jar(derechoTSBWjar
 	io/derecho/test/TypedSubgroupBWTest
     OUTPUT_NAME
         typed_subgroup_bw_test
+	MANIFEST
+		Manifest.txt
     INCLUDE_JARS
+)
+
+create_javadoc(derecho_jni_doc
+	PACKAGES io.derecho io.derecho.test
+	SOURCEPATH "${CMAKE_CURRENT_SOURCE_DIR}/java"
+	CLASSPATH ${CMAKE_JAVA_INCLUDE_PATH}
+	WINDOWTITLE "Derecho Java Documentation"
+	DOCTITLE "<h1>Derecho Java Documentation</h1>"
+	AUTHOR TRUE
+	USE TRUE
+	VERSION TRUE
 )
 
 include_directories(${JAVA_INCLUDE_PATH}

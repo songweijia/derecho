@@ -109,6 +109,17 @@ public:
         this->group = group;
         this->subgroup_index = subgroup_index;
     }
+    
+    template <typename SubgroupType>
+    template <rpc::FunctionTag tag, typename... Args>
+    auto rpc_resend(Args&&... args) {
+        derecho::Replicated<SubgroupType>& subgroup_handle = group->template get_subgroup<SubgroupType>(subgroup_index);
+        auto results = subgroup_handle.template ordered_send<tag>(std::forward<Args>(args)...);
+        auto& replies = results.get();
+        for (auto& reply_pair : replies) {
+            reply_pair.second.get();
+        }
+    };
 };
 
 /**

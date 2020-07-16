@@ -8,10 +8,14 @@ pragma_once = '#pragma once\n'
 includes = ('#include <tuple>\n')
 register_functions_begin = '#define REGISTER_RPC_FUNCTIONS{count}(classname, {args_list}) \\\n'
 register_functions_declaration = '    static auto register_functions() {\\\n'
-register_functions_one = '        return std::make_tuple(derecho::rpc::tag<CT_STRING(a)::hash()>(& classname :: a));\\\n'
-register_functions_first_line = '        return std::make_tuple(derecho::rpc::tag<CT_STRING(a)::hash()>(& classname :: a),\\\n'
-register_functions_mid_line = '                               derecho::rpc::tag<CT_STRING({method})::hash()>(& classname :: {method}),\\\n'
-register_functions_last_line = '                               derecho::rpc::tag<CT_STRING({method})::hash()>(& classname :: {method}));\\\n'
+if_is_base_of = '        if constexpr(std::is_base_of_v<derecho::GroupReference, classname>) {\\\n'
+else_is_base_of = '        } else { \\\n'
+if_end = '        } \\\n'
+register_functions_one = '            return std::make_tuple(derecho::rpc::tag<CT_STRING(a)::hash()>(& classname :: a));\\\n'
+register_functions_first_line = '            return std::make_tuple(derecho::rpc::tag<CT_STRING(a)::hash()>(& classname :: a),\\\n'
+register_functions_mid_line = '                                   derecho::rpc::tag<CT_STRING({method})::hash()>(& classname :: {method}),\\\n'
+register_functions_last_line = '                                   derecho::rpc::tag<CT_STRING({method})::hash()>(& classname :: {method}));\\\n'
+rpc_resend = '                                   derecho::rpc::tag<CT_STRING(derecho::GroupReference::rpc_resend)::hash()>(&derecho::GroupReference::rpc_resend));\\\n'
 register_functions_end = '    } \n'
 
 ### Comment block that goes at the top of the file ###
@@ -71,11 +75,24 @@ with open(OUTPUT_FILENAME, 'w') as output:
             args_list=', '.join(method_vars)))
         output.write(register_functions_declaration)
         if curr_num_methods > 1:
+            output.write(if_is_base_of)
+            output.write(register_functions_first_line)
+            for method_num in range(1, curr_num_methods):
+                output.write(register_functions_mid_line.format(method=method_vars[method_num]))
+            output.write(rpc_resend)
+            output.write(else_is_base_of)
+            
             output.write(register_functions_first_line)
             for method_num in range(1, curr_num_methods - 1):
                 output.write(register_functions_mid_line.format(method=method_vars[method_num]))
             output.write(register_functions_last_line.format(method=method_vars[-1]))
+            output.write(if_end)
         else:
+            output.write(if_is_base_of)
+            output.write(register_functions_first_line)
+            output.write(rpc_resend)
+            output.write(else_is_base_of)
             output.write(register_functions_one)
+            output.write(if_end)
         output.write(register_functions_end)
     output.write(file_footer)

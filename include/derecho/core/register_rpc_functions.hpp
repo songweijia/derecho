@@ -2,6 +2,7 @@
 #include "detail/rpc_utils.hpp"
 #include <mutils/macro_utils.hpp>
 #include <tuple>
+#include "group.hpp"
 
 /**
  * This is an automatically-generated file that makes it easier for user-created
@@ -13,7 +14,12 @@
 
 #define REGISTER_RPC_FUNCTIONS2(classname, a)                                           \
     static auto register_functions() {                                                  \
-        return std::make_tuple(derecho::rpc::tag<CT_STRING(a)::hash()>(&classname::a)); \
+        if constexpr(std::is_base_of_v<derecho::GroupReference, classname>) {                            \
+            return std::make_tuple(derecho::rpc::tag<CT_STRING(a)::hash()>(&classname::a),  \
+                                   derecho::rpc::tag<CT_STRING(derecho::GroupReference::rpc_resend)::hash()>(&derecho::GroupReference::rpc_resend)); \
+        } else { \
+            return std::make_tuple(derecho::rpc::tag<CT_STRING(a)::hash()>(&classname::a)); \
+        } \
     }
 #define REGISTER_RPC_FUNCTIONS3(classname, a, b)                                        \
     static auto register_functions() {                                                  \

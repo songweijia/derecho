@@ -10,6 +10,22 @@
 #include <sys/time.h>
 
 namespace sst {
+
+std::ostream& operator<<(std::ostream& os, MESSAGE_TYPE rt) {
+    switch(rt) {
+        case MESSAGE_TYPE::P2P_REPLY:
+            os << "P2P reply";
+            break;
+        case MESSAGE_TYPE::P2P_REQUEST:
+            os << "P2P request";
+            break;
+        case MESSAGE_TYPE::RPC_REPLY:
+            os << "RPC reply";
+            break;
+    }
+    return os;
+}
+
 P2PConnection::P2PConnection(uint32_t my_node_id, uint32_t remote_id, uint64_t p2p_buf_size, const ConnectionParams& connection_params)
         : my_node_id(my_node_id), remote_id(remote_id), connection_params(connection_params) {
     incoming_p2p_buffer = std::make_unique<volatile uint8_t[]>(p2p_buf_size);

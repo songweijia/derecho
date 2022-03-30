@@ -21,6 +21,8 @@ namespace rpc {
 
 thread_local bool _in_rpc_handler = false;
 
+thread_local node_id_t RPCManager::rpc_caller_id;
+
 RPCManager::~RPCManager() {
     thread_shutdown = true;
     if(rpc_listener_thread.joinable()) {
@@ -128,6 +130,7 @@ std::exception_ptr RPCManager::parse_and_receive(uint8_t* buf, std::size_t size,
     node_id_t received_from;
     uint32_t flags;
     retrieve_header(&rdv, buf, payload_size, indx, received_from, flags);
+    RPCManager::rpc_caller_id = received_from;
     return receive_message(indx, received_from, buf + header_space(),
                            payload_size, out_alloc);
 }
@@ -216,7 +219,7 @@ void RPCManager::p2p_message_handler(node_id_t sender_id, uint8_t* msg_buf) {
     node_id_t received_from;
     uint32_t flags;
     retrieve_header(nullptr, msg_buf, payload_size, indx, received_from, flags);
-    dbg_default_trace("Handling a P2P message: function_id = {}, is_reply = {}, received_from = {}, payload_size = {}, invocation_id = {}",
+    dbg_default_trace("Handling a P2P message: function_id = {}, is_reply = {}, recieved_from = {}, payload_size = {}, invocation_id = {}",
                       indx.function_id, indx.is_reply, received_from, payload_size, ((long*)(msg_buf + header_size))[0]);
     if(indx.is_reply) {
         // REPLYs can be handled here because they do not block.
@@ -412,6 +415,7 @@ sst::P2PBufferHandle RPCManager::get_sendbuffer_ptr(uint32_t dest_id, sst::MESSA
         //ViewManager's view_mutex also prevents connections from being removed (because
         //that happens in new_view_callback)
         SharedLockedReference<View> view_and_lock = view_manager.get_current_view();
+
         //Check to see if the view changed between iterations of the loop, and re-get the rank
         if(curr_vid != view_and_lock.get().vid) {
             curr_vid = view_and_lock.get().vid;
@@ -476,6 +480,7 @@ void RPCManager::p2p_request_worker() {
         }
         reply_size = 0;
         uint64_t reply_seq_num = 0;
+        RPCManager::rpc_caller_id = received_from;
         receive_message(indx, received_from, request.msg_buf + header_size, payload_size,
                         [this, &reply_size, &reply_seq_num, &request](size_t _size) -> uint8_t* {
                             reply_size = _size;
@@ -559,6 +564,10 @@ void RPCManager::p2p_receive_loop() {
     // stop fifo worker.
     request_queue_cv.notify_one();
     request_worker_thread.join();
+}
+
+node_id_t RPCManager::get_rpc_caller_id() {
+    return rpc_caller_id;
 }
 
 bool in_rpc_handler() {
